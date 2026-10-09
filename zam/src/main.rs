@@ -4,14 +4,14 @@
 // Benchmark showed Rust's path-bound fingerprints cost 13× on 4-way worktree;
 // this design avoids that by keying on content hash alone.
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
 fn cache_dir() -> PathBuf {
-    let mut p = env::var("ZAMAK_CACHE_DIR")
+    let p = env::var("ZAMAK_CACHE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = env::var("USERPROFILE")
@@ -59,10 +59,18 @@ fn build(file: &str) -> String {
         });
         "CACHE MISS"
     };
-    format!("{label} {hash:.12} {file} {:.1}ms", start.elapsed().as_secs_f64() * 1000.0)
+    format!(
+        "{label} {hash:.12} {file} {:.1}ms",
+        start.elapsed().as_secs_f64() * 1000.0
+    )
 }
 
 fn demo() {
+    let demo_cache = env::temp_dir().join("zam_demo_cache");
+    fs::remove_dir_all(&demo_cache).ok();
+    fs::create_dir_all(&demo_cache).unwrap();
+    env::set_var("ZAMAK_CACHE_DIR", &demo_cache);
+
     // Two files with identical content in two different directories.
     // Path-independent cache → second build must be a hit.
     let tmp = env::temp_dir().join("zam_demo");
@@ -89,7 +97,10 @@ fn demo() {
     println!("{r2}");
 
     assert!(r1.starts_with("CACHE MISS"), "first build should miss");
-    assert!(r2.starts_with("CACHE HIT"), "second build from different dir must hit — path independence failed");
+    assert!(
+        r2.starts_with("CACHE HIT"),
+        "second build from different dir must hit — path independence failed"
+    );
 
     // Different content → must miss.
     let src2 = "fn main() { println(\"different\") }";
