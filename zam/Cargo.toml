@@ -1,0 +1,11 @@
+[package]
+name = "zam"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "zam"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
