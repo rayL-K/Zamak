@@ -4,14 +4,20 @@ fn size(text: &string) -> i64 {
     string.byte_len(text)
 }
 
+fn chars(text: &string) -> i64 {
+    string.char_len(text)
+}
+
 struct Person { name: string }
 
 fn main() {
     let text = "你好"
     println(size(&text))
+    println(chars(&text))
     println(text)
     let empty = ""
     println(string.byte_len(&empty))
+    println(string.char_len(&empty))
     let same = "你好"
     println(string.equal(&text, &same))
     println(string.equal(&text, &empty))

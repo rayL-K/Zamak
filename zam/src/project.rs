@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Result<T> = std::result::Result<T, String>;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-15");
+const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-16");
 
 pub fn hash(parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
@@ -377,12 +377,14 @@ impl Project {
                 }
             }
             Expr::Call(name, args) => {
-                if matches!(name.as_str(), "string.byte_len" | "string.equal")
-                    && self.modules[module]
-                        .module
-                        .imports
-                        .iter()
-                        .any(|p| p == "std/string")
+                if matches!(
+                    name.as_str(),
+                    "string.byte_len" | "string.char_len" | "string.equal"
+                ) && self.modules[module]
+                    .module
+                    .imports
+                    .iter()
+                    .any(|p| p == "std/string")
                 {
                     if self.modules[module]
                         .module
@@ -407,8 +409,10 @@ impl Project {
                     let left = Box::new(args.remove(0));
                     *expr = if equal {
                         Expr::StringEqual(left, Box::new(args.remove(0)))
-                    } else {
+                    } else if name == "string.byte_len" {
                         Expr::ByteLen(left)
+                    } else {
+                        Expr::CharLen(left)
                     };
                     return Ok(());
                 }
@@ -417,7 +421,9 @@ impl Project {
                     self.resolve_expr(module, arg)?;
                 }
             }
-            Expr::Unary(_, value) | Expr::ByteLen(value) => self.resolve_expr(module, value)?,
+            Expr::Unary(_, value) | Expr::ByteLen(value) | Expr::CharLen(value) => {
+                self.resolve_expr(module, value)?
+            }
             Expr::Array(values) => {
                 for value in values {
                     self.resolve_expr(module, value)?;

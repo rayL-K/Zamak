@@ -10,14 +10,14 @@ fn borrowed_byte_length() {
             .output()
             .unwrap()
     };
-    fs::write(&path, "use std/string\nfn size(s: &string) -> i64 { string.byte_len(s) }\nfn main() {\nlet s = \"你好\"\nprintln(string.byte_len(&s))\nprintln(size(&s))\nprintln(s)\nlet empty = \"\"\nprintln(string.byte_len(&empty))\nstring.byte_len(&s)\n}\n").unwrap();
+    fs::write(&path, "use std/string\nfn size(s: &string) -> i64 { string.byte_len(s) }\nfn chars(s: &string) -> i64 { string.char_len(s) }\nfn main() {\nlet s = \"你好\"\nprintln(string.byte_len(&s))\nprintln(size(&s))\nprintln(string.char_len(&s))\nprintln(chars(&s))\nprintln(s)\nlet empty = \"\"\nprintln(string.byte_len(&empty))\nprintln(string.char_len(&empty))\nlet ascii = \"abc\"\nprintln(string.char_len(&ascii))\nstring.byte_len(&s)\nstring.char_len(&s)\n}\n").unwrap();
     let output = invoke("run");
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).ends_with("6\n6\n你好\n0\n"));
+    assert!(String::from_utf8_lossy(&output.stdout).ends_with("6\n6\n2\n2\n你好\n0\n0\n3\n"));
     for source in [
         "fn main() { let s = \"x\"\nprintln(string.byte_len(&s)) }",
         "use std/string\nfn main() { string.byte_len() }",
@@ -26,6 +26,18 @@ fn borrowed_byte_length() {
         "use std/string\nfn main() { let mut s = \"x\"\nstring.byte_len(&mut s) }",
         "use std/string\nfn main() { let s = \"x\"\nlet moved = s\nstring.byte_len(&s) }",
         "use std/string\nfn main() { let s = \"x\"\nlet b: bool = string.byte_len(&s) }",
+    ] {
+        fs::write(&path, source).unwrap();
+        assert!(!invoke("check").status.success(), "accepted {source}");
+    }
+    for source in [
+        "fn main() { let s = \"x\"\nprintln(string.char_len(&s)) }",
+        "use std/string\nfn main() { string.char_len() }",
+        "use std/string\nfn main() { let s = \"x\"\nstring.char_len(s) }",
+        "use std/string\nfn main() { let n = 1\nstring.char_len(&n) }",
+        "use std/string\nfn main() { let mut s = \"x\"\nstring.char_len(&mut s) }",
+        "use std/string\nfn main() { let s = \"x\"\nlet moved = s\nstring.char_len(&s) }",
+        "use std/string\nfn main() { let s = \"x\"\nlet b: bool = string.char_len(&s) }",
     ] {
         fs::write(&path, source).unwrap();
         assert!(!invoke("check").status.success(), "accepted {source}");

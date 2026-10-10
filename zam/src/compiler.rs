@@ -31,6 +31,7 @@ pub enum Expr {
     Borrow(String, bool),
     Call(String, Vec<Expr>),
     ByteLen(Box<Expr>),
+    CharLen(Box<Expr>),
     StringEqual(Box<Expr>, Box<Expr>),
     Int(i64),
     Bool(bool),
@@ -751,7 +752,7 @@ pub fn encode(module: &Module) -> Vec<u8> {
         .map(|(name, structure)| (name, structure.public, &structure.fields))
         .collect();
     format!(
-        "ZAM-IR-9\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
+        "ZAM-IR-10\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
         module.type_names, module.imports, module.functions
     )
     .into_bytes()
@@ -827,7 +828,7 @@ impl Checker<'_> {
             },
             Expr::Text(_) => Ok(Type::Owned),
             Expr::Format(_) => Ok(Type::Owned),
-            Expr::Int(_) | Expr::ByteLen(_) => Ok(Type::Int),
+            Expr::Int(_) | Expr::ByteLen(_) | Expr::CharLen(_) => Ok(Type::Int),
             Expr::Bool(_) | Expr::StringEqual(_, _) => Ok(Type::Bool),
             Expr::Variable(name) => Ok(self.binding(name)?.ty),
             Expr::Borrow(_, mutable) => Ok(if *mutable {
@@ -939,6 +940,12 @@ impl Checker<'_> {
             Expr::ByteLen(value) => {
                 if expected != Type::Int {
                     return Err("byte_len returns i64".into());
+                }
+                self.expr(value, Type::Shared, &mut loans.clone())
+            }
+            Expr::CharLen(value) => {
+                if expected != Type::Int {
+                    return Err("char_len returns i64".into());
                 }
                 self.expr(value, Type::Shared, &mut loans.clone())
             }
@@ -1234,7 +1241,10 @@ impl Checker<'_> {
                             .get(callee)
                             .ok_or_else(|| format!("unknown function {callee}"))?
                             .result
-                    } else if matches!(expr, Expr::ByteLen(_) | Expr::StringEqual(_, _)) {
+                    } else if matches!(
+                        expr,
+                        Expr::ByteLen(_) | Expr::CharLen(_) | Expr::StringEqual(_, _)
+                    ) {
                         self.ty(expr)?
                     } else {
                         return Err("expected function call".into());

@@ -1,4 +1,6 @@
-use crate::compiler::{field_path, record_id, record_order, Block, Expr, Instruction, Module, Type};
+use crate::compiler::{
+    field_path, record_id, record_order, Block, Expr, Instruction, Module, Type,
+};
 use crate::project::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,6 +54,8 @@ static S own(const unsigned char *p, size_t n) {
 static void drop(S *s) { free(s->data); s->data = NULL; s->len = 0; }
 static S take(S *s) { S value = *s; s->data = NULL; s->len = 0; return value; }
 static int64_t byte_len(S *s) { if ((uintmax_t)s->len > INT64_MAX) arithmetic_error(); return (int64_t)s->len; }
+// ponytail: 按 UTF-8 续字节计数，不校验编码合法性；非法字节按其起始字节计一个字符。
+static int64_t char_len(S *s) { int64_t n = 0; for (size_t i = 0; i < s->len; i++) { if ((s->data[i] & 0xC0) != 0x80) n++; } return n; }
 static int string_equal(S *a, S *b) { return a->len == b->len && (!a->len || memcmp(a->data,b->data,a->len) == 0); }
 static void print(S *s) {
     if ((s->len && fwrite(s->data, 1, s->len, stdout) != s->len) || fputc('\n', stdout) == EOF) exit(1);
@@ -113,7 +117,7 @@ impl Generator<'_> {
                     .expect("checked field path")
                     .1
             }
-            Expr::Int(_) | Expr::ByteLen(_) => Type::Int,
+            Expr::Int(_) | Expr::ByteLen(_) | Expr::CharLen(_) => Type::Int,
             Expr::Array(values) => Type::ArrayInt(values.len()),
             Expr::Index(local, _) => match self.locals[local].1 {
                 Type::ArrayInt(_) => Type::Int,
@@ -246,6 +250,13 @@ impl Generator<'_> {
                     _ => unreachable!("checked shared string"),
                 };
                 self.scalar(&format!("byte_len({pointer})"), Type::Int)
+            }
+            Expr::CharLen(value) => {
+                let pointer = match value.as_ref() {
+                    Expr::Variable(name) | Expr::Borrow(name, _) => self.pointer(name),
+                    _ => unreachable!("checked shared string"),
+                };
+                self.scalar(&format!("char_len({pointer})"), Type::Int)
             }
             Expr::Array(values) => {
                 let length = values.len();
@@ -624,7 +635,9 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
                     calls(value, needed, records);
                 }
             }
-            Expr::Unary(_, value) | Expr::ByteLen(value) => calls(value, needed, records),
+            Expr::Unary(_, value) | Expr::ByteLen(value) | Expr::CharLen(value) => {
+                calls(value, needed, records)
+            }
             Expr::Array(values) => {
                 for value in values {
                     calls(value, needed, records);
@@ -841,7 +854,7 @@ pub fn tool() -> Result<(String, String)> {
     }
 }
 
-pub const OPTIONS: &str = "c11-O2-MT-Brepro-pathmap-objects-v2";
+pub const OPTIONS: &str = "c11-O2-MT-Brepro-pathmap-objects-v3";
 pub fn compile(tool: &str, dir: &Path, source: &str) -> Result<Vec<u8>> {
     std::fs::write(dir.join("program.c"), source).map_err(|e| e.to_string())?;
     let output = if cfg!(windows) {
@@ -849,7 +862,8 @@ pub fn compile(tool: &str, dir: &Path, source: &str) -> Result<Vec<u8>> {
         command.current_dir(dir).args(["/d", "/s", "/c"]);
         let mapped = std::fs::canonicalize(dir).map_err(|e| e.to_string())?.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
         if mapped.contains(['"', '%', '\r', '\n']) { return Err("unsupported native cache path".into()); }
-        cmd_line(&mut command, &format!("\"call \"{tool}\" >nul && cl /nologo /O2 /MT /Brepro /c /d2pathmap:\"{mapped}=Z:\" program.c /Fo:program.obj\""));
+        // ponytail: 源码按 UTF-8 写出，cl 默认按本地代码页(如 936)读取会吞掉中文注释后的下一行；/utf-8 固定两端编码。
+        cmd_line(&mut command, &format!("\"call \"{tool}\" >nul && cl /nologo /O2 /MT /Brepro /utf-8 /c /d2pathmap:\"{mapped}=Z:\" program.c /Fo:program.obj\""));
         command.output()
     } else {
         Command::new(tool).current_dir(dir).args(["-std=c11", "-O2", "-c", "program.c", "-o", "program.obj"]).output()
