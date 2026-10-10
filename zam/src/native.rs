@@ -56,6 +56,24 @@ static int string_equal(S *a, S *b) { return a->len == b->len && (!a->len || mem
 static void print(S *s) {
     if ((s->len && fwrite(s->data, 1, s->len, stdout) != s->len) || fputc('\n', stdout) == EOF) exit(1);
 }
+static S copy(S *s) { return own(s->data, s->len); }
+static S cat(S a, S b) {
+    size_t n = a.len + b.len;
+    unsigned char *p = (unsigned char*)malloc(n ? n : 1);
+    if (!p) { fputs("zam: allocation failed\n", stderr); exit(1); }
+    if (a.len) memcpy(p, a.data, a.len);
+    if (b.len) memcpy(p + a.len, b.data, b.len);
+    drop(&a); drop(&b);
+    S s; s.data = p; s.len = n; return s;
+}
+static S from_int(int64_t value) {
+    char buffer[32];
+    int n = snprintf(buffer, sizeof buffer, "%" PRId64, value);
+    return own((const unsigned char*)buffer, (size_t)n);
+}
+static S from_bool(int value) {
+    return own((const unsigned char*)(value ? "true" : "false"), value ? 4 : 5);
+}
 "#;
 
 struct Generator<'a> {
@@ -102,7 +120,7 @@ impl Generator<'_> {
                 _ => unreachable!(),
             },
             Expr::Bool(_) | Expr::StringEqual(_, _) => Type::Bool,
-            Expr::Text(_) => Type::Owned,
+            Expr::Text(_) | Expr::Format(_) => Type::Owned,
             Expr::Variable(name) => self.locals[name].1,
             Expr::Borrow(_, mutable) => {
                 if *mutable {
@@ -141,6 +159,21 @@ impl Generator<'_> {
         self.code.push_str(&format!("S {name} = {value};\n"));
         self.owners.push((name.clone(), Type::Owned));
         name
+    }
+    fn literal(&self, text: &str) -> String {
+        let bytes = text
+            .as_bytes()
+            .iter()
+            .map(|b| format!("\\x{b:02x}"))
+            .collect::<String>();
+        format!("own((const unsigned char*)\"{bytes}\", {})", text.len())
+    }
+    fn text_of(&self, pointer: String, ty: Type) -> String {
+        match ty {
+            Type::Owned | Type::Shared | Type::Mutable => format!("copy({pointer})"),
+            Type::Int => format!("from_int({pointer})"),
+            _ => format!("from_bool({pointer})"),
+        }
     }
     fn pointer(&self, name: &str) -> String {
         if let Some((root, field)) = name.split_once('.') {
@@ -238,16 +271,36 @@ impl Generator<'_> {
                     Type::Int,
                 )
             }
-            Expr::Text(text) => {
-                let bytes = text
-                    .as_bytes()
-                    .iter()
-                    .map(|b| format!("\\x{b:02x}"))
-                    .collect::<String>();
-                self.temporary(&format!(
-                    "own((const unsigned char*)\"{bytes}\", {})",
-                    text.len()
-                ))
+            Expr::Text(text) => self.temporary(&self.literal(text)),
+            Expr::Format(segments) => {
+                let mut parts = Vec::with_capacity(segments.len());
+                for segment in segments {
+                    parts.push(match segment {
+                        Expr::Text(text) => self.literal(text),
+                        Expr::Variable(name) => {
+                            let pointer = self.pointer(name);
+                            self.text_of(pointer, self.ty(segment))
+                        }
+                        Expr::Field(local, field) => {
+                            let ty = self.ty(segment);
+                            let target = self.field(local, field);
+                            let target = if matches!(ty, Type::Int | Type::Bool) {
+                                target
+                            } else {
+                                format!("&{target}")
+                            };
+                            self.text_of(target, ty)
+                        }
+                        _ => unreachable!("interpolation only produces text and field paths"),
+                    });
+                }
+                let mut parts = parts.into_iter();
+                let name = self.temporary(&parts.next().expect("interpolation has segments"));
+                for part in parts {
+                    self.code
+                        .push_str(&format!("{name} = cat({name}, {part});\n"));
+                }
+                name
             }
             Expr::Int(value) => self.scalar(
                 &if *value == i64::MIN {

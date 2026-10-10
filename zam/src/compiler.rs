@@ -26,6 +26,7 @@ pub enum Expr {
     Record(String, Vec<(String, Expr)>),
     Field(String, String),
     Text(String),
+    Format(Vec<Expr>),
     Variable(String),
     Borrow(String, bool),
     Call(String, Vec<Expr>),
@@ -128,9 +129,6 @@ fn lex(source: &str) -> Result<(Vec<Token>, Vec<SourcePosition>), String> {
                                 Some('\\') => '\\',
                                 _ => return Err("unsupported string escape".into()),
                             }),
-                            '{' | '}' => {
-                                return Err("string interpolation is not supported yet".into())
-                            }
                             '\n' | '\r' => return Err("newline in string literal".into()),
                             c => text.push(c),
                         }
@@ -356,7 +354,7 @@ impl Parser {
         }
         if let Some(Token::Text(text)) = self.peek().cloned() {
             self.take();
-            return Ok(Expr::Text(text));
+            return literal(&text);
         }
         if self.symbol('[') {
             let mut values = Vec::new();
@@ -538,6 +536,68 @@ impl Parser {
     }
 }
 
+// 字符串插值：`{name}` 读取变量或字段，`{{`/`}}` 输出字面大括号。
+// ponytail: 花括号内只接受变量与字段路径；需要任意表达式时把插值下沉到代码生成。
+fn literal(text: &str) -> Result<Expr, String> {
+    let mut segments = Vec::new();
+    let mut literal = String::new();
+    let mut changed = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                literal.push('{');
+                changed = true;
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                literal.push('}');
+                changed = true;
+            }
+            '{' => {
+                changed = true;
+                if !literal.is_empty() {
+                    segments.push(Expr::Text(std::mem::take(&mut literal)));
+                }
+                let mut inner = String::new();
+                loop {
+                    match chars.next() {
+                        Some('}') => break,
+                        Some('{') => return Err("nested { in string interpolation".into()),
+                        Some(c) => inner.push(c),
+                        None => return Err("unterminated { in string literal".into()),
+                    }
+                }
+                let path = inner.trim();
+                let valid = !path.is_empty()
+                    && path.split('.').all(|part| {
+                        part.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                            && part.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    });
+                if !valid {
+                    return Err(format!(
+                        "unsupported interpolation {{{inner}}}: expected a variable or field path"
+                    ));
+                }
+                segments.push(match path.split_once('.') {
+                    Some((root, field)) => Expr::Field(root.into(), field.into()),
+                    None => Expr::Variable(path.into()),
+                });
+            }
+            '}' => return Err("unmatched } in string literal".into()),
+            c => literal.push(c),
+        }
+    }
+    if !changed {
+        return Ok(Expr::Text(text.into()));
+    }
+    if !literal.is_empty() {
+        segments.push(Expr::Text(literal));
+    }
+    Ok(Expr::Format(segments))
+}
+
 pub fn parse(source: &str) -> Result<Module, String> {
     let (tokens, lines) = lex(source)?;
     let mut p = Parser {
@@ -679,7 +739,7 @@ pub fn encode(module: &Module) -> Vec<u8> {
         .map(|(name, structure)| (name, structure.public, &structure.fields))
         .collect();
     format!(
-        "ZAM-IR-7\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
+        "ZAM-IR-8\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
         module.type_names, module.imports, module.functions
     )
     .into_bytes()
@@ -753,6 +813,7 @@ impl Checker<'_> {
                 _ => Err("index requires i64 array".into()),
             },
             Expr::Text(_) => Ok(Type::Owned),
+            Expr::Format(_) => Ok(Type::Owned),
             Expr::Int(_) | Expr::ByteLen(_) => Ok(Type::Int),
             Expr::Bool(_) | Expr::StringEqual(_, _) => Ok(Type::Bool),
             Expr::Variable(name) => Ok(self.binding(name)?.ty),
@@ -867,6 +928,15 @@ impl Checker<'_> {
                     return Err("byte_len returns i64".into());
                 }
                 self.expr(value, Type::Shared, &mut loans.clone())
+            }
+            Expr::Format(segments) if expected == Type::Owned => {
+                for segment in segments {
+                    // 插值只读取变量，不移动；未支持的类型在检查阶段拒绝。
+                    if !matches!(self.ty(segment)?, Type::Owned | Type::Int | Type::Bool) {
+                        return Err("cannot interpolate this value".into());
+                    }
+                }
+                Ok(())
             }
             Expr::Text(_) if expected == Type::Owned => Ok(()),
             Expr::Int(_) if expected == Type::Int => Ok(()),
