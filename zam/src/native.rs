@@ -1018,7 +1018,14 @@ pub fn tool() -> Result<(String, String)> {
 /// MSVC 环境装载一次就够：`vcvars64.bat` 每次执行约 4 秒（它派发一批子脚本与注册表查询），
 /// 而它算出来的 INCLUDE/LIB 在同一个 VS 安装里是稳定的。缓存文件放临时目录
 /// （不能放 Zamak 自己的缓存目录，那里的条目数被并发测试断言）。
+/// 进程内再记一份：模块级并行编译时多个线程会同时要环境，`OnceLock` 保证只装载一次。
 fn msvc_environment(setup: &str) -> Result<BTreeMap<String, String>> {
+    static LOADED: std::sync::OnceLock<Result<BTreeMap<String, String>>> =
+        std::sync::OnceLock::new();
+    LOADED.get_or_init(|| load_environment(setup)).clone()
+}
+
+fn load_environment(setup: &str) -> Result<BTreeMap<String, String>> {
     let stamp = std::fs::metadata(setup)
         .map(|meta| {
             let modified = meta

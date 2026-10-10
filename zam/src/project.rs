@@ -531,28 +531,55 @@ impl Project {
             );
         }
         let (tool, identity) = native::tool()?;
+        let entry = format!("{}:main", self.entry);
         let mut objects = Vec::new();
         let mut object_keys = Vec::new();
-        for id in self.modules.keys() {
-            let source = native::generate(&linked, &format!("{}:main", self.entry), id);
-            let key = hash(&[
-                VERSION.as_bytes(),
-                source.as_bytes(),
-                identity.as_bytes(),
-                native::OPTIONS.as_bytes(),
-                env::consts::OS.as_bytes(),
-                env::consts::ARCH.as_bytes(),
-            ]);
-            let (bytes, hit) = native_cached(cache, &key, "obj", |scratch| {
-                native::compile(&tool, scratch, &source)
-            })?;
-            eprintln!(
-                "OBJECT {} {:.12} {id}",
-                if hit { "HIT" } else { "MISS" },
-                key
-            );
-            objects.push(bytes);
-            object_keys.push(key);
+        // ponytail: 模块级并行编译。每个模块一次 C 编译器进程（cl/cc 各约 0.3 秒），串行编译
+        // 是冷构建和接口变更的主要成本。并发度按内存封顶（每个编译器约 30–60 MB，
+        // DESIGN §8 要求构建峰值 < 200 MB），需要调就设 ZAMAK_JOBS。
+        let jobs = jobs();
+        for chunk in self.modules.keys().collect::<Vec<_>>().chunks(jobs) {
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|id| {
+                        let (linked, entry, tool, identity) = (&linked, &entry, &tool, &identity);
+                        scope.spawn(move || -> Result<(String, Vec<u8>)> {
+                            let source = native::generate(linked, entry, id);
+                            let key = hash(&[
+                                VERSION.as_bytes(),
+                                source.as_bytes(),
+                                identity.as_bytes(),
+                                native::OPTIONS.as_bytes(),
+                                env::consts::OS.as_bytes(),
+                                env::consts::ARCH.as_bytes(),
+                            ]);
+                            let (bytes, hit) = native_cached(cache, &key, "obj", |scratch| {
+                                native::compile(tool, scratch, &source)
+                            })?;
+                            eprintln!(
+                                "OBJECT {} {:.12} {id}",
+                                if hit { "HIT" } else { "MISS" },
+                                key
+                            );
+                            Ok((key, bytes))
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|_| Err("worker panicked".into()))
+                    })
+                    .collect::<Vec<Result<(String, Vec<u8>)>>>()
+            });
+            for result in results {
+                let (key, bytes) = result?;
+                object_keys.push(key);
+                objects.push(bytes);
+            }
         }
         let app_key = hash(&[
             VERSION.as_bytes(),
@@ -579,6 +606,19 @@ impl Project {
         eprintln!("OUTPUT {}", artifact.display());
         Ok(artifact)
     }
+}
+
+/// 并行编译的并发度：默认取可用核数，内存封顶 4；`ZAMAK_JOBS=1` 可关掉并行。
+fn jobs() -> usize {
+    env::var("ZAMAK_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map_or(1, std::num::NonZeroUsize::get)
+                .min(4)
+        })
 }
 
 fn native_cached(
