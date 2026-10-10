@@ -43,7 +43,9 @@ hello from zamak
 你好，Zamak
 ```
 
-`build` 输出 `OUTPUT <path>`，Windows 上是 `build/<name>-<hash>.exe`，Unix 上是同名的无后缀可执行文件，可以直接启动，也可用 `zam run <path>` 执行。产物不需要安装 Zamak 或 Rust；Windows 静态链接 C 运行库。命令失败返回非零退出码，错误写入 stderr。词法/语法错误包含源码文件、行号与列号；列号从 1 开始，按 Unicode 字符计数，制表符算一个字符，EOF 使用末尾位置。词法错误指向 token 起点，语法错误指向解析器发现错误的位置。语义错误包含行号、列号与所属函数，位置取当前语句的起点（`missing string return value` 取函数声明处）；因为一个模块对应一个文件，函数前面的模块名即可定位文件。没有路径参数时使用当前目录；源码后缀统一为 `.zm`；可以直接检查或构建单个源码文件。
+`build` 在 stderr 输出 `OUTPUT <path>`，Windows 上是 `build/<name>-<hash>.exe`，Unix 上是同名的无后缀可执行文件，可以直接启动，也可用 `zam run <path>` 执行。产物不需要安装 Zamak 或 Rust；Windows 静态链接 C 运行库。命令失败返回非零退出码，错误写入 stderr。词法/语法错误包含源码文件、行号与列号；列号从 1 开始，按 Unicode 字符计数，制表符算一个字符，EOF 使用末尾位置。词法错误指向 token 起点，语法错误指向解析器发现错误的位置。语义错误包含行号、列号与所属函数，位置取当前语句的起点（`missing string return value` 取函数声明处）；因为一个模块对应一个文件，函数前面的模块名即可定位文件。没有路径参数时使用当前目录；源码后缀统一为 `.zm`；可以直接检查或构建单个源码文件。构建进度（`CACHE`/`OBJECT`/`LINK`/`OUTPUT`）和错误都写 stderr，stdout 只留程序输出。
+
+`zam check --json` 与 `zam build --json` 把结果写成一行 JSON 供编辑器、CI 等工具读取：`{"command":"check","ok":false,"diagnostics":[{"file":"…","line":3,"column":9,"function":"main:main","message":"…"}]}`。`function` 与位置在无法定位时为 `null`；失败时 stderr 仍保留一行人类可读信息，退出码与不带 `--json` 时一致。其他子命令不接受 `--json`。
 
 Windows 构建需要 Visual Studio C++ 工具，自动通过 `vswhere` 查找 x64 MSVC。本机已安装。Unix 后端调用 `cc`，可通过 `CC` 指定编译器程序；已在 Ubuntu 26.04 + gcc 15.2 上实机验证构建、执行和全部集成回归。`check` 不需要 C 编译器。旧 `.zbc` 产物已不再支持，需要重新构建。
 
@@ -51,7 +53,7 @@ Windows 构建需要 Visual Studio C++ 工具，自动通过 `vswhere` 查找 x6
 
 - **VS Code 语法扩展**：`editors/vscode/`。纯声明式（一份 TextMate 语法 + 语言配置，没有 `main`、没有运行时依赖、不联网），提供 `.zm` 文件的关键字/类型/字符串插值/注释高亮与括号、引号配对；同一份 `syntaxes/zamak.tmLanguage.json` 也可给 Sublime Text、TextMate 等支持 TextMate 语法的编辑器复用。本地安装、打包 `.vsix` 与上架市场的步骤见 `editors/vscode/README.md`。
 - **AI 技能**：`.agents/skills/zamak/SKILL.md`。面向遵循 `.agents/skills` 约定的 AI 编程代理（DSH、Claude Code 等）：命令与环境变量、语法速览、常见诊断文本、示例与测试的位置，以及修改编译器本身时的验收命令和 IR/缓存版本号规则。
-- **CLI**：就是 `zam` 本身（`check`/`build`/`run`/`demo`、`--help`、`--version`，缓存目录可用 `ZAMAK_CACHE_DIR` 覆盖）。还没有包管理器，也没有格式化子命令。
+- **CLI**：就是 `zam` 本身（`check`/`build`/`run`/`demo`、`--help`、`--version`，`check`/`build` 支持 `--json` 机器可读诊断；缓存目录可用 `ZAMAK_CACHE_DIR` 覆盖）。还没有包管理器，也没有格式化子命令。
 
 ## 项目配置
 

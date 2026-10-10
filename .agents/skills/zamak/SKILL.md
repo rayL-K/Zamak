@@ -11,7 +11,8 @@ Zamak 是静态类型、编译到原生可执行文件的小语言，仓库在 `
 
 - `zam check [project|file]`、`zam build ...`、`zam run ...`、`zam demo`；无路径参数时用当前目录；源码后缀统一 `.zm`，可直接对单个源码文件操作；`run` 也能直接执行已构建的产物。
 - `zam --version` / `--help`；缓存目录默认 `~/.zam/cache`，可用环境变量 `ZAMAK_CACHE_DIR` 覆盖。`check` 不需要 C 编译器。
-- `build` 输出 `OUTPUT <path>`，Windows 为 `build/<name>-<hash>.exe`；命令失败返回非零码，错误写 stderr。
+- `zam check --json` / `zam build --json` 在 stdout 输出一行机器可读诊断：`{"command","ok","diagnostics":[{file,line,column,function,message}]}`（无法定位的字段为 `null`），失败时 stderr 仍有一行人类可读信息；其他子命令不接受 `--json`。
+- 构建进度（`CACHE`/`OBJECT`/`LINK`/`OUTPUT`）与错误都写 **stderr**，stdout 只有程序输出或 `--json` 的那一行；`build` 的 `OUTPUT <path>`（Windows 为 `build/<name>-<hash>.exe`）现在也在 stderr。命令失败返回非零码。
 
 ## 语法速览（动手前先看 `examples/`）
 
