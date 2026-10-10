@@ -186,6 +186,52 @@ fn lex(source: &str) -> Result<(Vec<Token>, Vec<SourcePosition>), String> {
     Ok((tokens, lines))
 }
 
+/// 只规范化空白：按大括号深度重排每行缩进、去掉行尾空白、统一结尾换行。
+/// 不重建 token，所以注释、字符串内容与行内空格原样保留，永远不会丢注释。
+/// ponytail: 未做行内空格重排与长行折行；需要时再从 token 流重建整行。
+pub fn format(source: &str) -> Result<String, String> {
+    if source.is_empty() {
+        return Ok(String::new());
+    }
+    let (tokens, positions) = lex(source)?;
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut lines = Vec::new();
+    let mut depth = 0usize;
+    let mut cursor = 0usize;
+    for (index, text) in source.lines().enumerate() {
+        let line = index + 1;
+        // 先消费严格在本行之前的 token，depth 即本行起点的深度。
+        while cursor < tokens.len() && positions[cursor].0 < line {
+            match tokens[cursor] {
+                Token::Symbol('{') => depth += 1,
+                Token::Symbol('}') => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            cursor += 1;
+        }
+        let closes = cursor < tokens.len()
+            && positions[cursor].0 == line
+            && tokens[cursor] == Token::Symbol('}');
+        let indent = depth.saturating_sub(usize::from(closes));
+        let content = text.trim();
+        lines.push(if content.is_empty() {
+            String::new()
+        } else {
+            format!("{}{content}", " ".repeat(indent * 4))
+        });
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let mut formatted = lines.join(newline);
+    formatted.push_str(newline);
+    Ok(formatted)
+}
+
 struct Parser {
     tokens: Vec<Token>,
     lines: Vec<SourcePosition>,
@@ -1477,4 +1523,39 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_reindents_but_keeps_comments_and_text() {
+        let source = "fn main() {\n//顶层注释\n let x =1\n if true {\n println(x) //行尾注释\n#井号注释\n }\n}\n";
+        assert_eq!(
+            format(source).unwrap(),
+            "fn main() {\n    //顶层注释\n    let x =1\n    if true {\n        println(x) //行尾注释\n        #井号注释\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn format_is_idempotent_and_keeps_line_endings() {
+        let source =
+            "fn main() {\r\n\tlet text = \"你好\"\r\nif true {\r\nprintln(&text)\r\n}\r\n}\r\n";
+        let once = format(source).unwrap();
+        assert_eq!(format(&once).unwrap(), once);
+        assert!(once.contains("\r\n") && !once.replace("\r\n", "").contains('\n'));
+        assert!(once.contains("\"你好\""));
+
+        let unix = source.replace("\r\n", "\n");
+        let trimmed = format(&format(&unix).unwrap()).unwrap();
+        assert_eq!(trimmed, format(&unix).unwrap());
+        assert!(!trimmed.contains('\r'));
+    }
+
+    #[test]
+    fn format_drops_trailing_blank_lines_and_reports_broken_source() {
+        assert_eq!(format("fn main() {\n}\n\n\n").unwrap(), "fn main() {\n}\n");
+        assert!(format("fn main() {\nprintln(\"open\n}\n").is_err());
+    }
 }

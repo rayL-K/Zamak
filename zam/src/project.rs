@@ -79,6 +79,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 struct Input {
     source: String,
     module: Module,
+    // `zam fmt` 要落盘；模块 id 与文件名不一定同名（单文件入口恒为 main）。
+    path: PathBuf,
 }
 
 pub struct Project {
@@ -133,7 +135,14 @@ fn scan(dir: &Path, base: &Path, modules: &mut BTreeMap<String, Input>) -> Resul
             let module =
                 compiler::parse(&source).map_err(|e| format!("{}: {e}", path.display()))?;
             if modules
-                .insert(id.clone(), Input { source, module })
+                .insert(
+                    id.clone(),
+                    Input {
+                        source,
+                        module,
+                        path,
+                    },
+                )
                 .is_some()
             {
                 return Err(format!("duplicate module {id}"));
@@ -161,7 +170,14 @@ impl Project {
                 name: "main".into(),
                 root: input.parent().unwrap_or(Path::new(".")).into(),
                 entry: "main".into(),
-                modules: BTreeMap::from([("main".into(), Input { source, module })]),
+                modules: BTreeMap::from([(
+                    "main".into(),
+                    Input {
+                        source,
+                        module,
+                        path: input.to_path_buf(),
+                    },
+                )]),
             });
         }
         let manifest = if input.is_dir() {
@@ -247,6 +263,14 @@ impl Project {
             return Err(format!("{module}: {call} is private"));
         }
         Ok(format!("{target}:{name}"))
+    }
+
+    /// 模块在磁盘上的真实路径，供 `zam fmt` 就地重写。
+    pub fn module_paths(&self) -> Vec<PathBuf> {
+        self.modules
+            .values()
+            .map(|input| input.path.clone())
+            .collect()
     }
 
     pub fn check(&self) -> Result<()> {

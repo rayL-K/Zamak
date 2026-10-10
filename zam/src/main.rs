@@ -9,7 +9,7 @@ fn execute() -> project::Result<()> {
     let json = args.iter().any(|arg| arg == "--json");
     let args: Vec<String> = args.into_iter().filter(|arg| arg != "--json").collect();
     if args.len() > 2 {
-        return Err("usage: zam <check|build|run> [project|file]".into());
+        return Err("usage: zam <check|build|run|fmt> [project|file]".into());
     }
     let input = Path::new(args.get(1).map(String::as_str).unwrap_or("."));
     if json {
@@ -38,6 +38,7 @@ fn execute() -> project::Result<()> {
             println!("CHECK OK {}", project.name);
         }
         Some("build") => { project::Project::load(input)?.build(&project::cache_dir())?; }
+        Some("fmt") => format_sources(input)?,
         Some("run") => {
             // 源码后缀统一为 .zm；其余已存在的文件按原生产物直接执行。
             let source = input.extension().is_some_and(|ext| ext == "zm");
@@ -47,8 +48,25 @@ fn execute() -> project::Result<()> {
         }
         Some("demo") if args.len() == 1 => demo()?,
         Some("--version") | Some("-V") => println!("{}", env!("CARGO_PKG_VERSION")),
-        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact]\n  zam check --json [project|file]\n  zam build --json [project|file]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
-        _ => return Err("usage: zam <check|build|run> [project|file]".into()),
+        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam fmt [project|file]\n  zam run [project|file|artifact]\n  zam check --json [project|file]\n  zam build --json [project|file]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
+        _ => return Err("usage: zam <check|build|run|fmt> [project|file]".into()),
+    }
+    Ok(())
+}
+
+/// 就地重排缩进；只写真正变了的文件，改动过的路径打到 stderr（与构建进度一致）。
+fn format_sources(input: &Path) -> project::Result<()> {
+    // 先解析一遍：语法就不成立的代码不格式化，免得把错误改得更难看。
+    let project = project::Project::load(input)?;
+    for path in project.module_paths() {
+        let source =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let formatted =
+            compiler::format(&source).map_err(|e| format!("{}: {e}", path.display()))?;
+        if formatted != source {
+            std::fs::write(&path, &formatted).map_err(|e| format!("{}: {e}", path.display()))?;
+            eprintln!("FORMAT {}", path.display());
+        }
     }
     Ok(())
 }
