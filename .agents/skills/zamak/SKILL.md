@@ -44,9 +44,9 @@ Zamak 是静态类型、编译到原生可执行文件的小语言，仓库在 `
 
 ## 修改 Zamak 编译器本身
 
-1. 验收（工作目录 `zam/`）：`cargo test --locked`（12 个集成套件，冷跑约 5 分钟）、`cargo clippy --all-targets --locked -- -D warnings`、`cargo fmt --check`；改完源码要重新 `cargo install --path zam --locked` 才能用新的 `zam`。
+1. 验收（工作目录 `zam/`）：`cargo test --locked`（12 个集成套件，冷跑约 30 秒；MSVC 环境捕获会缓存在临时目录，首次多付约 4 秒）、`cargo clippy --all-targets --locked -- -D warnings`、`cargo fmt --check`；改完源码要重新 `cargo install --path zam --locked` 才能用新的 `zam`。
 2. 新增语言构造时按惯例升版本标记：`zam/src/compiler.rs` 的 encode 头 `ZAM-IR-N` 与 `zam/src/project.rs` 的 `VERSION`（`native-c-M`）。两者都参与缓存键，只作失效标记——缓存命中时按字节全等校验，没有 decode，旧产物只会报错不会静默错译；同时更新 `README.md` 里的 IR 号。
-3. C 后端源码按 UTF-8 写出，MSVC `cl` 默认按本地代码页（936）读取，会吞掉中文注释后的下一行 → 编译命令行必须保留 `/utf-8`；改动编译命令行要同步 `zam/src/native.rs` 的 `OPTIONS`（`-vN`）。
+3. C 后端源码按 UTF-8 写出，MSVC `cl` 默认按本地代码页（936）读取，会吞掉中文注释后的下一行 → 编译命令行必须保留 `/utf-8`；改动编译命令行要同步 `zam/src/native.rs` 的 `OPTIONS`（`-vN`）——但只在**产物字节真的变了**时升版：若只是改了调用方式（例如从 `cmd /c call vcvars64.bat && cl` 改成直接调 `cl.exe`），先用旧缓存验证仍全部 `OBJECT HIT`/`LINK HIT` 再决定不升，避免无谓的缓存失效。
 4. 示例放 `examples/<主题>/*.zm`（多模块项目为 `<主题>/src/main.zm` + `zam.toml`），并在 `zam/tests/<主题>.rs` 里用 `include_str!` 引用示例做正例与反例，真正运行产物并断言 stdout/stderr/退出码。
 5. 文档边界：`README.md` 会入库；`SYNTAX.md`、`ROADMAP.md`、`DESIGN.md`、`NAMING.md`、`MIGRATION.md` 被 `.gitignore` 忽略，只在本地维护。二者都要同步（README 如实标注缺口，ROADMAP 记进度）。
 6. 提交：分支 `main`，信息用 `<type>:中文描述`（feat/fix/test/docs/chore），按主题分批，必要时 `git push origin main`。
