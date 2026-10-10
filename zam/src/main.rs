@@ -39,6 +39,7 @@ fn execute() -> project::Result<()> {
         }
         Some("build") => { project::Project::load(input)?.build(&project::cache_dir())?; }
         Some("fmt") => format_sources(input)?,
+        Some("new") if args.len() == 2 => new_project(input)?,
         Some("run") => {
             // 源码后缀统一为 .zm；其余已存在的文件按原生产物直接执行。
             let source = input.extension().is_some_and(|ext| ext == "zm");
@@ -48,8 +49,41 @@ fn execute() -> project::Result<()> {
         }
         Some("demo") if args.len() == 1 => demo()?,
         Some("--version") | Some("-V") => println!("{}", env!("CARGO_PKG_VERSION")),
-        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam fmt [project|file]\n  zam run [project|file|artifact]\n  zam check --json [project|file]\n  zam build --json [project|file]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
-        _ => return Err("usage: zam <check|build|run|fmt> [project|file]".into()),
+        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam fmt [project|file]\n  zam run [project|file|artifact]\n  zam new <directory>\n  zam check --json [project|file]\n  zam build --json [project|file]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
+        _ => return Err("usage: zam <check|build|run|fmt|new> [project|file]".into()),
+    }
+    Ok(())
+}
+
+/// 生成一个最小可运行的项目骨架。目标目录已存在就拒绝，不覆盖任何用户文件。
+fn new_project(directory: &Path) -> project::Result<()> {
+    let name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("project name must be UTF-8")?;
+    if !project::identifier(name) {
+        return Err("project name must be an identifier".into());
+    }
+    if directory.exists() {
+        return Err(format!("{}: already exists", directory.display()));
+    }
+    let files = [
+        (
+            directory.join("zam.toml"),
+            format!("[project]\nname = \"{name}\"\nentry = \"src/main.zm\"\nmodules = \"src\"\n"),
+        ),
+        (
+            directory.join("src/main.zm"),
+            "fn main() {\n    println(\"hello from zamak\")\n}\n".to_string(),
+        ),
+        (directory.join(".gitignore"), "build/\n".to_string()),
+    ];
+    for (path, text) in files {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        eprintln!("NEW {}", path.display());
     }
     Ok(())
 }

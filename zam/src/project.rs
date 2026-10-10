@@ -152,7 +152,7 @@ fn scan(dir: &Path, base: &Path, modules: &mut BTreeMap<String, Input>) -> Resul
     Ok(())
 }
 
-fn identifier(name: &str) -> bool {
+pub fn identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
