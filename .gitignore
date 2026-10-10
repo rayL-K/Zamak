@@ -5,6 +5,7 @@ bench/generated/
 # Rust 构建产物
 target/
 **/target/
+**/build/
 
 # Go 构建产物
 *.exe
@@ -12,3 +13,7 @@ target/
 # 杂项
 .DS_Store
 *.log
+
+# 会话恢复材料（本地上下文，不属于仓库内容）
+_session-restore/
+session-resume-*/
