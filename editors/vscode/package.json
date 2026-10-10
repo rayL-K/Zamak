@@ -1,0 +1,48 @@
+{
+  "name": "zamak",
+  "displayName": "Zamak",
+  "description": "Zamak 语言支持：语法高亮、注释与括号配置。纯 TextMate 语法，无运行时依赖，同一份语法可被 VS Code / TextMate 系编辑器复用。",
+  "version": "0.1.0",
+  "publisher": "zamak",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "zamak",
+    "zam",
+    "language",
+    "grammar",
+    "syntax"
+  ],
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rayL-K/Zamak.git",
+    "directory": "editors/vscode"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "zamak",
+        "aliases": [
+          "Zamak",
+          "zam"
+        ],
+        "extensions": [
+          ".zm"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "zamak",
+        "scopeName": "source.zamak",
+        "path": "./syntaxes/zamak.tmLanguage.json"
+      }
+    ]
+  }
+}

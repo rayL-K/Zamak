@@ -1,0 +1,159 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Zamak",
+  "scopeName": "source.zamak",
+  "fileTypes": ["zm"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#declarations" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.zamak",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.line.number-sign.zamak",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.zamak",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.zamak",
+              "match": "\\\\[nrt\"\\\\]"
+            },
+            {
+              "name": "constant.character.escape.brace.zamak",
+              "match": "\\{\\{|\\}\\}"
+            },
+            {
+              "name": "meta.interpolation.zamak",
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                {
+                  "name": "variable.other.zamak",
+                  "match": "[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.zamak",
+          "match": "\\b(?:if|else|while|break|continue|return|catch)\\b"
+        },
+        {
+          "name": "keyword.other.zamak",
+          "match": "\\b(?:fn|pub|use|struct|let|mut|fail)\\b"
+        },
+        {
+          "name": "constant.language.zamak",
+          "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "name": "storage.type.zamak",
+          "match": "\\b(?:i64|bool|string)\\b"
+        },
+        {
+          "name": "support.function.builtin.zamak",
+          "match": "\\b(?:println|io\\.println|fmt\\.println)(?=\\s*\\()"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "entity.name.function.zamak",
+          "match": "(?<=\\bfn\\s+)[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "entity.name.type.zamak",
+          "match": "(?<=\\bstruct\\s+)[A-Za-z_][A-Za-z0-9_]*"
+        },
+        {
+          "name": "entity.name.namespace.zamak",
+          "match": "(?<=\\buse\\s+)[A-Za-z_][A-Za-z0-9_]*(?:/[A-Za-z_][A-Za-z0-9_]*)*"
+        },
+        {
+          "name": "entity.name.function.call.zamak",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*(?=\\()"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.zamak",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.zamak",
+          "match": "->"
+        },
+        {
+          "name": "keyword.operator.comparison.zamak",
+          "match": "<=|>=|==|!=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.zamak",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.assignment.zamak",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.zamak",
+          "match": "[+*/%-]"
+        },
+        {
+          "name": "keyword.operator.borrow.zamak",
+          "match": "&"
+        },
+        {
+          "name": "keyword.operator.try.zamak",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.bar.zamak",
+          "match": "\\|"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.terminator.zamak",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.zamak",
+          "match": "[,:]"
+        }
+      ]
+    }
+  }
+}
