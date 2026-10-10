@@ -527,10 +527,11 @@ impl Project {
             native::link(&tool, scratch, &objects)
         })?;
         println!("LINK {} {:.12}", if hit { "HIT" } else { "MISS" }, app_key);
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
         let artifact = self
             .root
             .join("build")
-            .join(format!("{}-{app_key}.exe", self.name));
+            .join(format!("{}-{app_key}{suffix}", self.name));
         atomic_write(&artifact, &bytes)?;
         #[cfg(unix)]
         {

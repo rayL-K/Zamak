@@ -18,12 +18,14 @@ fn execute() -> project::Result<()> {
         }
         Some("build") => { project::Project::load(input)?.build(&project::cache_dir())?; }
         Some("run") => {
-            let artifact = if input.extension().is_some_and(|ext| ext == "exe") { input.into() }
+            // 源码后缀统一为 .zm；其余已存在的文件按原生产物直接执行。
+            let source = input.extension().is_some_and(|ext| ext == "zm");
+            let artifact = if input.is_file() && !source { input.into() }
                 else { project::Project::load(input)?.build(&project::cache_dir())? };
             project::run_artifact(&artifact)?;
         }
         Some("demo") if args.len() == 1 => demo()?,
-        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact.exe]\n  zam demo", env!("CARGO_PKG_VERSION")),
+        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact]\n  zam demo", env!("CARGO_PKG_VERSION")),
         _ => return Err("usage: zam <check|build|run> [project|file]".into()),
     }
     Ok(())
