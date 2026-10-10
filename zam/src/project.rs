@@ -532,19 +532,22 @@ impl Project {
         }
         let (tool, identity) = native::tool()?;
         let entry = format!("{}:main", self.entry);
-        let mut objects = Vec::new();
-        let mut object_keys = Vec::new();
-        // ponytail: 模块级并行编译。每个模块一次 C 编译器进程（cl/cc 各约 0.3 秒），串行编译
-        // 是冷构建和接口变更的主要成本。并发度按内存封顶（每个编译器约 30–60 MB，
-        // DESIGN §8 要求构建峰值 < 200 MB），需要调就设 ZAMAK_JOBS。
+        // ponytail: 两段式。先把所有模块并行「生成 C + 查缓存」（每模块 3–8ms，忽略不计），
+        // 再把 MISS 单独排队编译。按模块下标分块会让已命中的模块白占并发位——改一处公开
+        // 签名时 11 个模块里只有 7 个 MISS，按下标分块要排 3 轮编译，按 MISS 排只要 2 轮。
+        // 每个 MISS 仍然在自己的 `cl` 里编 `program.c`，对象字节不变。
+        // 并发度按内存封顶（每个编译器约 30–60 MB，DESIGN §8 要求构建峰值 < 200 MB），
+        // 需要调就设 ZAMAK_JOBS。
         let jobs = jobs();
+        let mut slots: Vec<Option<(String, Vec<u8>)>> = Vec::with_capacity(self.modules.len());
+        let mut misses: Vec<(usize, String, String)> = Vec::new();
         for chunk in self.modules.keys().collect::<Vec<_>>().chunks(jobs) {
             let results = std::thread::scope(|scope| {
                 let handles: Vec<_> = chunk
                     .iter()
                     .map(|id| {
-                        let (linked, entry, tool, identity) = (&linked, &entry, &tool, &identity);
-                        scope.spawn(move || -> Result<(String, Vec<u8>)> {
+                        let (linked, entry, identity) = (&linked, &entry, &identity);
+                        scope.spawn(move || -> Result<(String, String, Option<Vec<u8>>)> {
                             let source = native::generate(linked, entry, id);
                             let key = hash(&[
                                 VERSION.as_bytes(),
@@ -554,15 +557,13 @@ impl Project {
                                 env::consts::OS.as_bytes(),
                                 env::consts::ARCH.as_bytes(),
                             ]);
-                            let (bytes, hit) = native_cached(cache, &key, "obj", |scratch| {
-                                native::compile(tool, scratch, &source)
-                            })?;
+                            let bytes = cached(cache, &key, "obj")?;
                             eprintln!(
                                 "OBJECT {} {:.12} {id}",
-                                if hit { "HIT" } else { "MISS" },
+                                if bytes.is_some() { "HIT" } else { "MISS" },
                                 key
                             );
-                            Ok((key, bytes))
+                            Ok((key, source, bytes))
                         })
                     })
                     .collect();
@@ -573,13 +574,53 @@ impl Project {
                             .join()
                             .unwrap_or_else(|_| Err("worker panicked".into()))
                     })
-                    .collect::<Vec<Result<(String, Vec<u8>)>>>()
+                    .collect::<Vec<Result<(String, String, Option<Vec<u8>>)>>>()
             });
             for result in results {
-                let (key, bytes) = result?;
-                object_keys.push(key);
-                objects.push(bytes);
+                let (key, source, bytes) = result?;
+                let slot = slots.len();
+                match bytes {
+                    Some(bytes) => slots.push(Some((key, bytes))),
+                    None => {
+                        slots.push(None);
+                        misses.push((slot, key, source));
+                    }
+                }
             }
+        }
+        for chunk in misses.chunks(jobs) {
+            let results = std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(_, key, source)| {
+                        let (cache, tool, key, source) = (cache, &tool, key, source);
+                        scope.spawn(move || -> Result<Vec<u8>> {
+                            let (bytes, _) = native_cached(cache, key, "obj", |scratch| {
+                                native::compile(tool, scratch, source)
+                            })?;
+                            Ok(bytes)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|_| Err("worker panicked".into()))
+                    })
+                    .collect::<Vec<Result<Vec<u8>>>>()
+            });
+            for ((slot, key, _), bytes) in chunk.iter().zip(results) {
+                slots[*slot] = Some((key.clone(), bytes?));
+            }
+        }
+        let mut objects = Vec::with_capacity(slots.len());
+        let mut object_keys = Vec::with_capacity(slots.len());
+        for slot in slots {
+            let (key, bytes) = slot.ok_or("native cache entry was not produced")?;
+            object_keys.push(key);
+            objects.push(bytes);
         }
         let app_key = hash(&[
             VERSION.as_bytes(),
@@ -621,40 +662,48 @@ fn jobs() -> usize {
         })
 }
 
+/// 只查缓存，不编译：命中要校验 sha256，字节对不上就是坏条目，缺失则返回 `None`。
+fn cached(cache: &Path, key: &str, extension: &str) -> Result<Option<Vec<u8>>> {
+    let path = cache.join(format!("{key}.{extension}"));
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let checksum = cache.join(format!("{key}.{extension}.sha256"));
+            let expected = fs::read_to_string(&checksum)
+                .map_err(|e| format!("missing native cache checksum: {e}"))?;
+            if hash(&[&bytes]) != expected {
+                return Err(format!("corrupt cache entry {}", path.display()));
+            }
+            Ok(Some(bytes))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 fn native_cached(
     cache: &Path,
     key: &str,
     extension: &str,
     build: impl FnOnce(&Path) -> Result<Vec<u8>>,
 ) -> Result<(Vec<u8>, bool)> {
-    let path = cache.join(format!("{key}.{extension}"));
-    let checksum = cache.join(format!("{key}.{extension}.sha256"));
-    match fs::read(&path) {
-        Ok(bytes) => {
-            let expected = fs::read_to_string(&checksum)
-                .map_err(|e| format!("missing native cache checksum: {e}"))?;
-            if hash(&[&bytes]) != expected {
-                return Err(format!("corrupt cache entry {}", path.display()));
-            }
-            Ok((bytes, true))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let scratch = cache.join(format!(
-                ".native-{}-{}",
-                std::process::id(),
-                TEMP_ID.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
-            let result = build(&scratch);
-            let cleanup = fs::remove_dir_all(&scratch);
-            let bytes = result?;
-            cleanup.map_err(|e| e.to_string())?;
-            atomic_write(&checksum, hash(&[&bytes]).as_bytes())?;
-            atomic_write(&path, &bytes)?;
-            Ok((bytes, false))
-        }
-        Err(e) => Err(e.to_string()),
+    if let Some(bytes) = cached(cache, key, extension)? {
+        return Ok((bytes, true));
     }
+    let checksum = cache.join(format!("{key}.{extension}.sha256"));
+    let path = cache.join(format!("{key}.{extension}"));
+    let scratch = cache.join(format!(
+        ".native-{}-{}",
+        std::process::id(),
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    let result = build(&scratch);
+    let cleanup = fs::remove_dir_all(&scratch);
+    let bytes = result?;
+    cleanup.map_err(|e| e.to_string())?;
+    atomic_write(&checksum, hash(&[&bytes]).as_bytes())?;
+    atomic_write(&path, &bytes)?;
+    Ok((bytes, false))
 }
 
 pub fn run_artifact(path: &Path) -> Result<()> {
