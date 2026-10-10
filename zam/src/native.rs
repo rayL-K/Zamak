@@ -941,16 +941,6 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
     source
 }
 
-fn cmd_line(command: &mut Command, line: &str) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.raw_arg(line);
-    }
-    #[cfg(not(windows))]
-    command.arg(line);
-}
-
 pub fn tool() -> Result<(String, String)> {
     if cfg!(windows) {
         let root = std::env::var_os("ProgramFiles(x86)").ok_or("missing ProgramFiles(x86)")?;
@@ -1025,20 +1015,126 @@ pub fn tool() -> Result<(String, String)> {
     }
 }
 
+/// MSVC 环境装载一次就够：`vcvars64.bat` 每次执行约 4 秒（它派发一批子脚本与注册表查询），
+/// 而它算出来的 INCLUDE/LIB 在同一个 VS 安装里是稳定的。缓存文件放临时目录
+/// （不能放 Zamak 自己的缓存目录，那里的条目数被并发测试断言）。
+fn msvc_environment(setup: &str) -> Result<BTreeMap<String, String>> {
+    let stamp = std::fs::metadata(setup)
+        .map(|meta| {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |elapsed| elapsed.as_nanos());
+            format!("{}-{modified}", meta.len())
+        })
+        .map_err(|e| format!("MSVC setup unavailable: {e}"))?;
+    let name = crate::project::hash(&[setup.as_bytes()]);
+    let path = std::env::temp_dir().join(format!("zam-msvc-{name}.txt"));
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Some((first, rest)) = text.split_once('\n') {
+            if first == stamp {
+                return Ok(parse_environment(rest));
+            }
+        }
+    }
+    // 命令写进 .bat 再执行：`cmd /c` 只认自己的引号规则，而 Rust 把参数里的引号转义成
+    // `\"`（cmd 不认），带空格的 vcvars 路径就永远找不到。
+    let script = std::env::temp_dir().join(format!("zam-msvc-{name}.bat"));
+    let setup = setup.replace('/', r"\");
+    std::fs::write(
+        &script,
+        format!("@echo off\r\ncall \"{setup}\" >nul\r\nset\r\n"),
+    )
+    .map_err(|e| format!("MSVC setup failed: {e}"))?;
+    let output = Command::new("cmd")
+        .args(["/d", "/s", "/c"])
+        .arg(&script)
+        .output()
+        .map_err(|e| format!("MSVC setup failed: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "MSVC setup failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !text.lines().any(|line| line.starts_with("INCLUDE=")) {
+        return Err("MSVC setup produced no INCLUDE".into());
+    }
+    // 写不进去也无所谓，只是下次还要重新装载一遍。
+    let _ = std::fs::write(&path, format!("{stamp}\n{text}"));
+    Ok(parse_environment(&text))
+}
+
+/// `set` 的输出按本机代码页编码（中文机器上是 936），用户目录里的中文会解码成替换字符，
+/// 所以只收值全为 ASCII 的键——MSVC 自己的目录（INCLUDE/LIB/VCToolsInstallDir/…）都是 ASCII。
+/// ponytail: 需要带非 ASCII 环境的编译选项时再处理编码。
+fn parse_environment(text: &str) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::new();
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            if !key.is_empty() && !key.starts_with('=') && value.is_ascii() {
+                environment.insert(key.to_ascii_uppercase(), value.to_owned());
+            }
+        }
+    }
+    environment
+}
+
+/// 直接用绝对路径调 cl.exe/link.exe，不再借道 `cmd /c call vcvars64.bat`。
+fn msvc_tool(environment: &BTreeMap<String, String>, name: &str) -> Result<std::path::PathBuf> {
+    if let Some(dir) = environment.get("VCTOOLSINSTALLDIR") {
+        let path = Path::new(dir).join("bin/Hostx64/x64").join(name);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    for entry in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let path = entry.join(name);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(format!("MSVC {name} not found"))
+}
+
 pub const OPTIONS: &str = "c11-O2-MT-Brepro-pathmap-objects-v3";
 pub fn compile(tool: &str, dir: &Path, source: &str) -> Result<Vec<u8>> {
     std::fs::write(dir.join("program.c"), source).map_err(|e| e.to_string())?;
     let output = if cfg!(windows) {
-        let mut command = Command::new("cmd");
-        command.current_dir(dir).args(["/d", "/s", "/c"]);
-        let mapped = std::fs::canonicalize(dir).map_err(|e| e.to_string())?.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
-        if mapped.contains(['"', '%', '\r', '\n']) { return Err("unsupported native cache path".into()); }
+        let environment = msvc_environment(tool)?;
+        let mapped = std::fs::canonicalize(dir)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_owned();
+        if mapped.contains(['"', '%', '\r', '\n']) {
+            return Err("unsupported native cache path".into());
+        }
         // ponytail: 源码按 UTF-8 写出，cl 默认按本地代码页(如 936)读取会吞掉中文注释后的下一行；/utf-8 固定两端编码。
-        cmd_line(&mut command, &format!("\"call \"{tool}\" >nul && cl /nologo /O2 /MT /Brepro /utf-8 /c /d2pathmap:\"{mapped}=Z:\" program.c /Fo:program.obj\""));
-        command.output()
+        Command::new(msvc_tool(&environment, "cl.exe")?)
+            .current_dir(dir)
+            .envs(&environment)
+            .args([
+                "/nologo",
+                "/O2",
+                "/MT",
+                "/Brepro",
+                "/utf-8",
+                "/c",
+                &format!("/d2pathmap:{mapped}=Z:"),
+                "program.c",
+                "/Fo:program.obj",
+            ])
+            .output()
     } else {
-        Command::new(tool).current_dir(dir).args(["-std=c11", "-O2", "-c", "program.c", "-o", "program.obj"]).output()
-    }.map_err(|e| e.to_string())?;
+        Command::new(tool)
+            .current_dir(dir)
+            .args(["-std=c11", "-O2", "-c", "program.c", "-o", "program.obj"])
+            .output()
+    }
+    .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(format!(
             "native compilation failed:\n{}{}",
@@ -1057,12 +1153,21 @@ pub fn link(tool: &str, dir: &Path, objects: &[Vec<u8>]) -> Result<Vec<u8>> {
         names.push(name);
     }
     let output = if cfg!(windows) {
-        let mut command = Command::new("cmd"); command.current_dir(dir).args(["/d", "/s", "/c"]);
-        cmd_line(&mut command, &format!("\"call \"{tool}\" >nul && link /nologo /Brepro /INCREMENTAL:NO /OUT:program.exe {}\"", names.join(" ")));
-        command.output()
+        let environment = msvc_environment(tool)?;
+        Command::new(msvc_tool(&environment, "link.exe")?)
+            .current_dir(dir)
+            .envs(&environment)
+            .args(["/nologo", "/Brepro", "/INCREMENTAL:NO", "/OUT:program.exe"])
+            .args(&names)
+            .output()
     } else {
-        Command::new(tool).current_dir(dir).args(&names).args(["-o", "program.exe"]).output()
-    }.map_err(|e| e.to_string())?;
+        Command::new(tool)
+            .current_dir(dir)
+            .args(&names)
+            .args(["-o", "program.exe"])
+            .output()
+    }
+    .map_err(|e| e.to_string())?;
     if !output.status.success() {
         return Err(format!(
             "native linking failed:\n{}{}",
@@ -1071,4 +1176,24 @@ pub fn link(tool: &str, dir: &Path, objects: &[Vec<u8>]) -> Result<Vec<u8>> {
         ));
     }
     std::fs::read(dir.join("program.exe")).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_takes_ascii_values_only() {
+        let text = "Include=C:\\MSVC\\include\r\nLiB=D:\\lib\r\n=TEMP=C:\\tmp\r\n\
+                    用户目录=C:\\中文\\路径\r\nEMPTY=\r\n";
+        let environment = parse_environment(text);
+        assert_eq!(
+            environment.get("INCLUDE").map(String::as_str),
+            Some("C:\\MSVC\\include")
+        );
+        assert_eq!(environment.get("LIB").map(String::as_str), Some("D:\\lib"));
+        assert_eq!(environment.get("EMPTY").map(String::as_str), Some(""));
+        assert!(!environment.contains_key("=TEMP"));
+        assert!(!environment.contains_key("用户目录"));
+    }
 }
