@@ -9,7 +9,8 @@ Zamak 是静态类型、编译到原生可执行文件的小语言，仓库在 `
 
 ## 命令
 
-- `zam check [project|file]`、`zam build ...`、`zam run ...`、`zam demo`；无路径参数时用当前目录；源码后缀统一 `.zm`，可直接对单个源码文件操作；`run` 也能直接执行已构建的产物。
+- `zam check [project|file]`、`zam build ...`、`zam run ...`、`zam fmt ...`、`zam demo`；无路径参数时用当前目录；源码后缀统一 `.zm`，可直接对单个源码文件操作；`run` 也能直接执行已构建的产物。
+- `zam fmt` 只规范化空白：按大括号深度把每行缩进改成 4 空格的倍数、去行尾空白、结尾留一个换行、保留原换行风格（CRLF 仍是 CRLF）。它不重建 token，所以注释和字符串内容不会丢；改过的文件路径以 `FORMAT <path>` 打到 stderr，已规范的文件不重写。语法坏掉的代码先被拒绝（走 `check` 同一套解析）。不做行内空格重排与折行。
 - `zam --version` / `--help`；缓存目录默认 `~/.zam/cache`，可用环境变量 `ZAMAK_CACHE_DIR` 覆盖。`check` 不需要 C 编译器。
 - `zam check --json` / `zam build --json` 在 stdout 输出一行机器可读诊断：`{"command","ok","diagnostics":[{file,line,column,function,message}]}`（无法定位的字段为 `null`），失败时 stderr 仍有一行人类可读信息；其他子命令不接受 `--json`。
 - 构建进度（`CACHE`/`OBJECT`/`LINK`/`OUTPUT`）与错误都写 **stderr**，stdout 只有程序输出或 `--json` 的那一行；`build` 的 `OUTPUT <path>`（Windows 为 `build/<name>-<hash>.exe`）现在也在 stderr。命令失败返回非零码。
