@@ -1,6 +1,13 @@
 # 构建缓存与生成物（可重建，不入库）
-bench/cache/
-bench/generated/
+bench/
+results/
+
+# 内部设计与开发文档：只在本地维护，不进公开仓库
+DESIGN.md
+MIGRATION.md
+NAMING.md
+ROADMAP.md
+SYNTAX.md
 
 # Rust 构建产物
 target/
