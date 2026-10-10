@@ -31,6 +31,7 @@ pub enum Expr {
     Borrow(String, bool),
     Call(String, Vec<Expr>),
     Try(Box<Expr>),
+    Catch(Box<Expr>, String, Block),
     ByteLen(Box<Expr>),
     CharLen(Box<Expr>),
     StringEqual(Box<Expr>, Box<Expr>),
@@ -190,6 +191,9 @@ struct Parser {
     lines: Vec<SourcePosition>,
     position: usize,
     type_names: BTreeMap<u64, String>,
+    // 当前函数的上下文；`catch` 的代码块出现在表达式位置，需要它来解析语句。
+    imports: Vec<String>,
+    result: Type,
 }
 impl Parser {
     fn at(&self) -> SourcePosition {
@@ -438,6 +442,13 @@ impl Parser {
         if self.symbol('?') {
             return Ok(Expr::Try(Box::new(call)));
         }
+        // `call catch e { ... }` 就地处理错误，不传播。
+        if self.keyword("catch") {
+            let binding = self.word()?;
+            let imports = self.imports.clone();
+            let block = self.block(&imports, self.result)?;
+            return Ok(Expr::Catch(Box::new(call), binding, block));
+        }
         Ok(call)
     }
     fn if_statement(&mut self, imports: &[String], result: Type) -> Result<Instruction, String> {
@@ -628,6 +639,8 @@ pub fn parse(source: &str) -> Result<Module, String> {
         lines,
         position: 0,
         type_names: BTreeMap::new(),
+        imports: Vec::new(),
+        result: Type::Unit,
     };
     let result = (|| {
         let mut module = Module {
@@ -736,6 +749,8 @@ pub fn parse(source: &str) -> Result<Module, String> {
             } else {
                 (Type::Unit, None)
             };
+            p.imports = module.imports.clone();
+            p.result = result;
             let body = p.block(&module.imports, result)?;
             if module
                 .functions
@@ -773,7 +788,7 @@ pub fn encode(module: &Module) -> Vec<u8> {
         .map(|(name, structure)| (name, structure.public, &structure.fields))
         .collect();
     format!(
-        "ZAM-IR-11\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
+        "ZAM-IR-12\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
         module.type_names, module.imports, module.functions
     )
     .into_bytes()
@@ -821,6 +836,8 @@ struct Checker<'a> {
     position: SourcePosition,
     // 当前函数的错误类型（`-> T!E` 的 E）；`?`/`fail` 依赖它。
     error: Option<Type>,
+    // 当前函数的成功类型；`catch` 的代码块按它检查 return。
+    result: Type,
 }
 impl Checker<'_> {
     fn binding(&self, name: &str) -> Result<&Binding, String> {
@@ -866,6 +883,8 @@ impl Checker<'_> {
                 .ok_or_else(|| format!("unknown function {name}")),
             // `?` 的值就是被调函数的成功值。
             Expr::Try(inner) => self.ty(inner),
+            // `catch` 的成功路径同样拿到被调函数的成功值。
+            Expr::Catch(inner, _, _) => self.ty(inner),
             Expr::Unary(op, _) => Ok(if *op == '!' { Type::Bool } else { Type::Int }),
             Expr::Binary(op, _, _) => Ok(if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
                 Type::Int
@@ -1107,6 +1126,39 @@ impl Checker<'_> {
                 }
                 self.call(name, &callee, args, expected, loans)
             }
+            Expr::Catch(inner, binding, block) => {
+                let Expr::Call(name, args) = &**inner else {
+                    return Err("catch requires a function call".into());
+                };
+                let callee = self
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| format!("unknown function {name}"))?
+                    .clone();
+                let error = callee.error.ok_or_else(|| {
+                    format!("catch requires a fallible call, but {name} cannot fail")
+                })?;
+                self.call(name, &callee, args, expected, loans)?;
+                // 错误值只在 catch 的代码块里可见。
+                if self.locals.contains_key(binding) {
+                    return Err(format!("duplicate binding {binding}"));
+                }
+                self.locals.insert(
+                    binding.clone(),
+                    Binding {
+                        ty: error,
+                        mutable: false,
+                        live: true,
+                    },
+                );
+                let returned = self.block(block, self.result)?;
+                self.locals.remove(binding);
+                // ponytail: 只认 return；需要 break/continue 收尾时再放宽。
+                if !returned {
+                    return Err(format!("catch block for {name} must return a value"));
+                }
+                Ok(())
+            }
             Expr::Borrow(_, _) => {
                 Err("borrow escape: references only belong in call arguments".into())
             }
@@ -1305,6 +1357,7 @@ impl Checker<'_> {
                             | Expr::CharLen(_)
                             | Expr::StringEqual(_, _)
                             | Expr::Try(_)
+                            | Expr::Catch(_, _, _)
                     ) {
                         self.ty(expr)?
                     } else {
@@ -1390,6 +1443,7 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
             loops: Vec::new(),
             position: function.position,
             error: function.error,
+            result: function.result,
         };
         let result = (|| {
             // ponytail: v1 只支持 string 错误类型；泛化 E 是纯增量（C 侧结果结构体按 E 再分一个维度）。

@@ -153,6 +153,7 @@ impl Generator<'_> {
             }
             Expr::Call(name, _) => self.module.functions[name].result,
             Expr::Try(inner) => self.ty(inner),
+            Expr::Catch(inner, _, _) => self.ty(inner),
             Expr::Unary(op, _) => {
                 if *op == '!' {
                     Type::Bool
@@ -421,17 +422,53 @@ impl Generator<'_> {
                 if result == Type::Unit {
                     return String::new();
                 }
-                if matches!(result, Type::Record(_)) {
-                    let value =
-                        self.scalar(&format!("take{}(&{temp}.value)", ctype(result)), result);
-                    self.owners.push((value.clone(), result));
-                    value
-                } else if result == Type::Owned {
-                    self.temporary(&format!("take(&{temp}.value)"))
-                } else {
-                    self.scalar(&format!("{temp}.value"), result)
-                }
+                self.result_value(&temp, result)
             }
+            Expr::Catch(inner, binding, block) => {
+                let Expr::Call(name, args) = &**inner else {
+                    unreachable!("checked catch operand")
+                };
+                let result = self.module.functions[name].result;
+                let call = self.raw_call(name, args);
+                let structure = fallible_name(result);
+                let temp = format!("v{}", self.next);
+                self.next += 1;
+                self.code
+                    .push_str(&format!("{structure} {temp} = {call};\n"));
+                self.code.push_str(&format!("if (!{temp}.ok) {{\n"));
+                let local = format!("v{}", self.next);
+                self.next += 1;
+                let previous = self
+                    .locals
+                    .insert(binding.clone(), (local.clone(), Type::Owned));
+                self.code
+                    .push_str(&format!("S {local} = take(&{temp}.error);\n"));
+                self.owners.push((local, Type::Owned));
+                // 代码块在所有路径上都 return（检查器保证），所以出块只需要清账本。
+                self.block(block, self.result);
+                self.owners.pop();
+                self.locals.remove(binding);
+                if let Some(previous) = previous {
+                    self.locals.insert(binding.clone(), previous);
+                }
+                self.code.push_str("}\n");
+                self.result_value(&temp, result)
+            }
+        }
+    }
+    // 从结果结构体里取出成功值；Unit 没有值，返回空串。
+    fn result_value(&mut self, temp: &str, result: Type) -> String {
+        if result == Type::Unit {
+            return String::new();
+        }
+        if matches!(result, Type::Record(_)) {
+            let value = self.scalar(&format!("take{}(&{temp}.value)", ctype(result)), result);
+            self.owners.push((value.clone(), result));
+            value
+        } else if result == Type::Owned {
+            self.temporary(&format!("take(&{temp}.value)"))
+        } else {
+            self.scalar(&format!("{temp}.value"), result)
         }
     }
     fn raw_call(&mut self, name: &str, args: &[Expr]) -> String {
@@ -718,6 +755,10 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
                 calls(value, needed, records)
             }
             Expr::Try(inner) => calls(inner, needed, records),
+            Expr::Catch(inner, _, block) => {
+                calls(inner, needed, records);
+                body_calls(block, needed, records);
+            }
             Expr::Array(values) => {
                 for value in values {
                     calls(value, needed, records);

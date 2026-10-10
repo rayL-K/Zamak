@@ -1,0 +1,19 @@
+// 错误值：catch 就地处理，不向外传播
+use std/string
+
+fn parse(text: &string) -> i64!string {
+    let empty = ""
+    if string.equal(text, &empty) {
+        fail "empty input"
+    }
+    return 42
+}
+
+fn main() {
+    let text = "42"
+    let value = parse(&text) catch e {
+        println("failed: {e}")
+        return
+    }
+    println(value)
+}

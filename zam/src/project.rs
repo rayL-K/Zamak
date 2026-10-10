@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Result<T> = std::result::Result<T, String>;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-17");
+const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-18");
 
 pub fn hash(parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
@@ -426,6 +426,10 @@ impl Project {
             | Expr::ByteLen(value)
             | Expr::CharLen(value)
             | Expr::Try(value) => self.resolve_expr(module, value)?,
+            Expr::Catch(inner, _, block) => {
+                self.resolve_expr(module, inner)?;
+                self.resolve_body(module, block)?;
+            }
             Expr::Array(values) => {
                 for value in values {
                     self.resolve_expr(module, value)?;
