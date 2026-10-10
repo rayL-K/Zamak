@@ -1,0 +1,26 @@
+use std/fmt
+
+struct Point {
+    x: i64
+    flag: bool
+    name: string
+}
+
+fn consume(text: string) {
+    println(text)
+}
+
+fn main() {
+    let name = "Zamak"
+    let point = Point {
+        x: 7
+        flag: true
+        name: "原点"
+    }
+    fmt.println("你好，{name}！x={point.x} {point.flag} {point.name}")
+    fmt.println("字面大括号 {{x}} 与 {{}}")
+    consume("{name}")
+    println(name)
+    let copy = "{name}"
+    consume(copy)
+}
