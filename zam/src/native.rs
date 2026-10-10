@@ -1099,7 +1099,9 @@ fn msvc_tool(environment: &BTreeMap<String, String>, name: &str) -> Result<std::
     Err(format!("MSVC {name} not found"))
 }
 
-pub const OPTIONS: &str = "c11-O2-MT-Brepro-pathmap-objects-v3";
+// ponytail: 只有产物字节真变才升版本（会让缓存整体失效）；改了编译/链接命令行但字节不变时，
+// 先用旧缓存跑一次构建、确认仍是 OBJECT HIT 再决定不升。
+pub const OPTIONS: &str = "c11-O2-MT-Brepro-pathmap-objects-v4";
 pub fn compile(tool: &str, dir: &Path, source: &str) -> Result<Vec<u8>> {
     std::fs::write(dir.join("program.c"), source).map_err(|e| e.to_string())?;
     let output = if cfg!(windows) {
@@ -1129,9 +1131,21 @@ pub fn compile(tool: &str, dir: &Path, source: &str) -> Result<Vec<u8>> {
             ])
             .output()
     } else {
+        // ponytail: `-g`（用户经 CC 传入）会把编译目录写进 DWARF，同一个缓存键在不同临时目录
+        // 就会编出不同字节，破坏「同键 ⇒ 同字节」并让并发构建报 corrupt cache entry。
+        // 把临时目录前缀映射掉即可，与 Windows 的 /d2pathmap 对应。
+        let map = format!("-ffile-prefix-map={}=.", dir.display());
         Command::new(tool)
             .current_dir(dir)
-            .args(["-std=c11", "-O2", "-c", "program.c", "-o", "program.obj"])
+            .args([
+                "-std=c11",
+                "-O2",
+                map.as_str(),
+                "-c",
+                "program.c",
+                "-o",
+                "program.obj",
+            ])
             .output()
     }
     .map_err(|e| e.to_string())?;
@@ -1147,8 +1161,10 @@ pub fn compile(tool: &str, dir: &Path, source: &str) -> Result<Vec<u8>> {
 
 pub fn link(tool: &str, dir: &Path, objects: &[Vec<u8>]) -> Result<Vec<u8>> {
     let mut names = Vec::new();
+    // ponytail: Windows 之外统一用 .o —— clang/ld（macOS）对 .obj 的识别不如 .o 可靠，MSVC 侧不变。
+    let suffix = if cfg!(windows) { "obj" } else { "o" };
     for (index, bytes) in objects.iter().enumerate() {
-        let name = format!("module{index}.obj");
+        let name = format!("module{index}.{suffix}");
         std::fs::write(dir.join(&name), bytes).map_err(|e| e.to_string())?;
         names.push(name);
     }
