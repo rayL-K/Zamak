@@ -18,6 +18,8 @@ Zamak 是为频繁构建、多 worktree 协作设计的语言原型。当前 `za
 
 ## 快速运行
 
+零基础读者从 [TUTORIAL.md](TUTORIAL.md) 开始：按小节讲语法，每段代码都给出实测输出。
+
 首次从本地源码安装（无需发布到包注册表），在仓库根目录执行：
 
 ```powershell
@@ -59,7 +61,7 @@ Windows 构建需要 Visual Studio C++ 工具，自动通过 `vswhere` 查找 x6
 
 - **VS Code 语法扩展**：`editors/vscode/`。纯声明式（一份 TextMate 语法 + 语言配置，没有 `main`、没有运行时依赖、不联网），提供 `.zm` 文件的关键字/类型/字符串插值/注释高亮与括号、引号配对；同一份 `syntaxes/zamak.tmLanguage.json` 也可给 Sublime Text、TextMate 等支持 TextMate 语法的编辑器复用。本地安装、打包 `.vsix` 与上架市场的步骤见 `editors/vscode/README.md`。
 - **AI 技能**：`.agents/skills/zamak/SKILL.md`。面向遵循 `.agents/skills` 约定的 AI 编程代理（DSH、Claude Code 等）：命令与环境变量、语法速览、常见诊断文本、示例与测试的位置，以及修改编译器本身时的验收命令和 IR/缓存版本号规则。
-- **CLI**：就是 `zam` 本身（`check`/`build`/`run`/`demo`、`--help`、`--version`，`check`/`build` 支持 `--json` 机器可读诊断；缓存目录可用 `ZAMAK_CACHE_DIR` 覆盖）。还没有包管理器，也没有格式化子命令。
+- **CLI**：就是 `zam` 本身（`check`/`build`/`run`/`fmt`/`new`/`demo`、`--help`、`--version`，`check`/`build` 支持 `--json` 机器可读诊断；缓存目录可用 `ZAMAK_CACHE_DIR` 覆盖）。还没有包管理器。
 
 ## 项目配置
 
