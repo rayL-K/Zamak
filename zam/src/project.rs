@@ -1,4 +1,4 @@
-use crate::compiler::{self, Expr, Instruction, Module};
+use crate::compiler::{self, Block, Expr, Instruction, Module};
 use crate::native;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Result<T> = std::result::Result<T, String>;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-14");
+const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-15");
 
 pub fn hash(parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
@@ -315,8 +315,8 @@ impl Project {
         Ok(())
     }
 
-    fn resolve_body(&self, module: &str, body: &mut [Instruction]) -> Result<()> {
-        for instruction in body {
+    fn resolve_body(&self, module: &str, body: &mut Block) -> Result<()> {
+        for (instruction, _) in body {
             if let Instruction::Let(_, _, Some(ty), _) = instruction {
                 self.resolve_type(module, ty)?;
             }

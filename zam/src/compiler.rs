@@ -49,8 +49,8 @@ pub enum Instruction {
     Print(Expr),
     Call(Expr),
     Return(Option<Expr>),
-    If(Expr, Vec<Instruction>, Vec<Instruction>),
-    While(Expr, Vec<Instruction>),
+    If(Expr, Block, Block),
+    While(Expr, Block),
     Break,
     Continue,
 }
@@ -60,7 +60,8 @@ pub struct Function {
     pub public: bool,
     pub params: Vec<(String, Type)>,
     pub result: Type,
-    pub body: Vec<Instruction>,
+    pub body: Block,
+    pub position: SourcePosition,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +79,8 @@ pub struct Module {
 }
 
 type SourcePosition = (usize, usize);
+// 语句序列：每条语句带上它在源码中的起始位置，供语义错误定位。
+pub type Block = Vec<(Instruction, SourcePosition)>;
 
 fn lex(source: &str) -> Result<(Vec<Token>, Vec<SourcePosition>), String> {
     let mut position = (1, 1);
@@ -178,10 +181,14 @@ fn lex(source: &str) -> Result<(Vec<Token>, Vec<SourcePosition>), String> {
 
 struct Parser {
     tokens: Vec<Token>,
+    lines: Vec<SourcePosition>,
     position: usize,
     type_names: BTreeMap<u64, String>,
 }
 impl Parser {
+    fn at(&self) -> SourcePosition {
+        self.lines[self.position.min(self.lines.len() - 1)]
+    }
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.position)
     }
@@ -428,8 +435,9 @@ impl Parser {
         let boundary = self.position;
         self.newlines();
         let no = if self.keyword("else") {
+            let position = self.at();
             if self.keyword("if") {
-                vec![self.if_statement(imports, result)?]
+                vec![(self.if_statement(imports, result)?, position)]
             } else {
                 self.block(imports, result)?
             }
@@ -440,7 +448,7 @@ impl Parser {
         Ok(Instruction::If(condition, yes, no))
     }
 
-    fn block(&mut self, imports: &[String], result: Type) -> Result<Vec<Instruction>, String> {
+    fn block(&mut self, imports: &[String], result: Type) -> Result<Block, String> {
         self.expect('{')?;
         self.newlines();
         let mut body = Vec::new();
@@ -448,8 +456,9 @@ impl Parser {
             if self.peek().is_none() {
                 return Err("unterminated function block".into());
             }
+            let position = self.at();
             let instruction = if self.keyword("if") {
-                body.push(self.if_statement(imports, result)?);
+                body.push((self.if_statement(imports, result)?, position));
                 self.separator()?;
                 continue;
             } else if self.keyword("while") {
@@ -528,7 +537,7 @@ impl Parser {
                     Instruction::Return(Some(expr))
                 }
             };
-            body.push(instruction);
+            body.push((instruction, position));
             self.separator()?;
         }
         self.take();
@@ -602,6 +611,7 @@ pub fn parse(source: &str) -> Result<Module, String> {
     let (tokens, lines) = lex(source)?;
     let mut p = Parser {
         tokens,
+        lines,
         position: 0,
         type_names: BTreeMap::new(),
     };
@@ -628,6 +638,7 @@ pub fn parse(source: &str) -> Result<Module, String> {
                 continue;
             }
             let public = p.keyword("pub");
+            let start = p.at();
             if p.keyword("struct") {
                 let name = p.word()?;
                 if matches!(name.as_str(), "string" | "i64" | "bool") {
@@ -714,6 +725,7 @@ pub fn parse(source: &str) -> Result<Module, String> {
                         params,
                         result,
                         body,
+                        position: start,
                     },
                 )
                 .is_some()
@@ -726,7 +738,7 @@ pub fn parse(source: &str) -> Result<Module, String> {
         Ok(module)
     })();
     result.map_err(|error: String| {
-        let (line, column) = lines[p.position.min(lines.len() - 1)];
+        let (line, column) = p.at();
         format!("line {line}, column {column}: {error}")
     })
 }
@@ -739,7 +751,7 @@ pub fn encode(module: &Module) -> Vec<u8> {
         .map(|(name, structure)| (name, structure.public, &structure.fields))
         .collect();
     format!(
-        "ZAM-IR-8\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
+        "ZAM-IR-9\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
         module.type_names, module.imports, module.functions
     )
     .into_bytes()
@@ -784,6 +796,7 @@ struct Checker<'a> {
     functions: &'a BTreeMap<String, Function>,
     locals: BTreeMap<String, Binding>,
     loops: Vec<(BTreeMap<String, Binding>, Expr)>,
+    position: SourcePosition,
 }
 impl Checker<'_> {
     fn binding(&self, name: &str) -> Result<&Binding, String> {
@@ -1056,11 +1069,12 @@ impl Checker<'_> {
             _ => Err("string type mismatch".into()),
         }
     }
-    fn block(&mut self, body: &[Instruction], result: Type) -> Result<bool, String> {
+    fn block(&mut self, body: &Block, result: Type) -> Result<bool, String> {
         let outer_names = self.locals.keys().cloned().collect();
         let mut returned = false;
         let mut terminated = false;
-        for instruction in body {
+        for (instruction, position) in body {
+            self.position = *position;
             if returned || terminated {
                 return Err("unreachable statement after return".into());
             }
@@ -1291,13 +1305,14 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
         return Err("main must have no parameters or return value".into());
     }
     for (name, function) in &module.functions {
+        let mut checker = Checker {
+            structs: &module.structs,
+            functions: &module.functions,
+            locals: BTreeMap::new(),
+            loops: Vec::new(),
+            position: function.position,
+        };
         let result = (|| {
-            let mut checker = Checker {
-                structs: &module.structs,
-                functions: &module.functions,
-                locals: BTreeMap::new(),
-                loops: Vec::new(),
-            };
             let mut names = BTreeSet::new();
             for (param, ty) in &function.params {
                 if !names.insert(param.clone()) {
@@ -1313,12 +1328,16 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
                 );
             }
             let returned = checker.block(&function.body, function.result)?;
+            checker.position = function.position;
             if function.result != Type::Unit && !returned {
                 return Err("missing string return value".into());
             }
             Ok(())
         })();
-        result.map_err(|error| format!("{name}: {error}"))?;
+        result.map_err(|error: String| {
+            let (line, column) = checker.position;
+            format!("line {line}, column {column}: {name}: {error}")
+        })?;
     }
     Ok(())
 }

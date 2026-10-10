@@ -1,4 +1,4 @@
-use crate::compiler::{field_path, record_id, record_order, Expr, Instruction, Module, Type};
+use crate::compiler::{field_path, record_id, record_order, Block, Expr, Instruction, Module, Type};
 use crate::project::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -403,11 +403,11 @@ impl Generator<'_> {
             }
         }
     }
-    fn block(&mut self, body: &[Instruction], result_type: Type) -> bool {
+    fn block(&mut self, body: &Block, result_type: Type) -> bool {
         let outer = self.locals.clone();
         let scope_start = self.owners.len();
         let mut returned = false;
-        for instruction in body {
+        for (instruction, _) in body {
             match instruction {
                 Instruction::If(condition, yes, no) => {
                     let value = self.expr(condition);
@@ -639,11 +639,11 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
         }
     }
     fn body_calls(
-        body: &[Instruction],
+        body: &Block,
         needed: &mut std::collections::BTreeSet<String>,
         records: &mut std::collections::BTreeSet<String>,
     ) {
-        for instruction in body {
+        for (instruction, _) in body {
             match instruction {
                 Instruction::Let(_, _, _, expr)
                 | Instruction::Assign(_, expr)
