@@ -14,7 +14,7 @@ Zamak 是为频繁构建、多 worktree 协作设计的语言原型。当前 `za
 
 ### 生态现状
 
-如实标注：只有 `check`、`build`、`run`、`fmt`、`demo` 五个子命令（外加 `--help`/`--version`）。标准库停在起步阶段（`std/string` 的 `byte_len`/`char_len`/`equal`，`std/io`、`std/fmt` 的 `println`）；编辑器支持只有一份做语法高亮的 VS Code 扩展（`editors/vscode/`，无语言服务器/补全/调试器），另有仓库内的 AI 技能说明（`.agents/skills/zamak/`）；没有包管理器、REPL 和文档生成；错误值只做到 `T!string` 与 `?`/`fail`/`catch`（其他错误类型、安装/发行流程尚未提供）；泛型、闭包、枚举、match、线程和 unsafe/FFI 都还没有。因此当前只适合作为原型和小规模示例，不适合生产使用。
+如实标注：只有 `check`、`build`、`run`、`fmt`、`new`、`demo` 六个子命令（外加 `--help`/`--version`）。标准库停在起步阶段（`std/string` 的 `byte_len`/`char_len`/`equal`，`std/io`、`std/fmt` 的 `println`）；编辑器支持只有一份做语法高亮的 VS Code 扩展（`editors/vscode/`，无语言服务器/补全/调试器），另有仓库内的 AI 技能说明（`.agents/skills/zamak/`）；没有包管理器、REPL 和文档生成；错误值只做到 `T!string` 与 `?`/`fail`/`catch`（其他错误类型、安装/发行流程尚未提供）；泛型、闭包、枚举、match、线程和 unsafe/FFI 都还没有。因此当前只适合作为原型和小规模示例，不适合生产使用。
 
 ## 快速运行
 
@@ -27,6 +27,7 @@ cargo install --path zam --locked
 安装目录需在 PATH 中；本机已配置。修改工具源码后，重新执行上述安装命令更新。日常使用直接执行：
 
 ```powershell
+zam new hello
 zam check examples/hello
 zam build examples/hello
 zam run examples/hello
@@ -47,6 +48,8 @@ hello from zamak
 `build` 在 stderr 输出 `OUTPUT <path>`，Windows 上是 `build/<name>-<hash>.exe`，Unix 上是同名的无后缀可执行文件，可以直接启动，也可用 `zam run <path>` 执行。产物不需要安装 Zamak 或 Rust；Windows 静态链接 C 运行库。命令失败返回非零退出码，错误写入 stderr。词法/语法错误包含源码文件、行号与列号；列号从 1 开始，按 Unicode 字符计数，制表符算一个字符，EOF 使用末尾位置。词法错误指向 token 起点，语法错误指向解析器发现错误的位置。语义错误包含行号、列号与所属函数，位置取当前语句的起点（`missing string return value` 取函数声明处）；因为一个模块对应一个文件，函数前面的模块名即可定位文件。没有路径参数时使用当前目录；源码后缀统一为 `.zm`；可以直接检查或构建单个源码文件。构建进度（`CACHE`/`OBJECT`/`LINK`/`OUTPUT`）和错误都写 stderr，stdout 只留程序输出。
 
 `zam check --json` 与 `zam build --json` 把结果写成一行 JSON 供编辑器、CI 等工具读取：`{"command":"check","ok":false,"diagnostics":[{"file":"…","line":3,"column":9,"function":"main:main","message":"…"}]}`。`function` 与位置在无法定位时为 `null`；失败时 stderr 仍保留一行人类可读信息，退出码与不带 `--json` 时一致。其他子命令不接受 `--json`。
+
+`zam new <directory>` 生成一个最小可运行的项目骨架：`zam.toml`（`name`/`entry = "src/main.zm"`/`modules = "src"`）、打印一句问候的 `src/main.zm`，以及忽略 `build/` 的 `.gitignore`；创建的文件路径以 `NEW <path>` 写到 stderr，stdout 保持为空。生成的骨架可以直接 `zam run`，而且本来就是格式化过的。目标目录已存在就报错退出，不覆盖任何已有文件；目录名必须同时是合法标识符（它会写进 `zam.toml` 的 `name`）。
 
 `zam fmt [project|file]` 就地整理源码格式：按大括号深度重排每行缩进（每次 4 个空格）、去掉行尾空白、结尾统一留一个换行，并保留原有的换行风格（CRLF 文件仍是 CRLF）。它只改空白、不重建 token，所以注释、字符串内容和行内空格原样保留，不会丢注释；改写过的文件路径以 `FORMAT <path>` 写到 stderr，已经规范的文件不重写也不报告。语法不成立的代码会先被拒绝（与 `check` 同一套解析），不会被改得更难读。当前不做行内空格重排和长行折行。
 
@@ -139,6 +142,6 @@ node editors/vscode/scripts/check-grammar.mjs
 
 最后一条校验编辑器扩展的声明式配置：三个 JSON 可解析、TextMate 语法里每条正则可编译、语言 id / 后缀 / `scopeName` / 仓库分组引用互相一致。
 
-集成检查覆盖跨目录缓存复用、原生产物一致性、独立执行、中文输出、依赖变更和独立模块命中、四个进程共享冷缓存、缓存损坏、语法错误、可见性、依赖环和配置路径校验。另覆盖字符串移动、借用修改、返回、重新初始化、重复共享借用，以及移动后使用、借用冲突/逃逸、错误参数和不可变赋值等反例；字符串插值覆盖中文字面量、整数/布尔/字段读取、非移动读取，以及未闭合、嵌套、未知变量和移动后使用等拒绝；诊断覆盖词法/语法错误的文件与行列，以及语义错误的行列与函数定位。错误值覆盖 `?` 的跨函数传播、未捕获错误写 stderr 并以退出码 1 结束、`catch` 就地处理（成功与失败两条路径），以及漏写 `?`、无错误签名函数里的 `?`/`fail`、非 `string` 错误类型、catch 代码块不返回、对不可失败调用 catch、catch 绑定撞名等反例。`zam fmt` 覆盖项目级重排缩进、注释与字符串内容原样保留、CRLF 文件保持 CRLF、二次运行报告无改动、语法坏掉的代码被拒绝，以及单文件与整目录两种入口。
+集成检查覆盖跨目录缓存复用、原生产物一致性、独立执行、中文输出、依赖变更和独立模块命中、四个进程共享冷缓存、缓存损坏、语法错误、可见性、依赖环和配置路径校验。另覆盖字符串移动、借用修改、返回、重新初始化、重复共享借用，以及移动后使用、借用冲突/逃逸、错误参数和不可变赋值等反例；字符串插值覆盖中文字面量、整数/布尔/字段读取、非移动读取，以及未闭合、嵌套、未知变量和移动后使用等拒绝；诊断覆盖词法/语法错误的文件与行列，以及语义错误的行列与函数定位。错误值覆盖 `?` 的跨函数传播、未捕获错误写 stderr 并以退出码 1 结束、`catch` 就地处理（成功与失败两条路径），以及漏写 `?`、无错误签名函数里的 `?`/`fail`、非 `string` 错误类型、catch 代码块不返回、对不可失败调用 catch、catch 绑定撞名等反例。`zam fmt` 覆盖项目级重排缩进、注释与字符串内容原样保留、CRLF 文件保持 CRLF、二次运行报告无改动、语法坏掉的代码被拒绝，以及单文件与整目录两种入口。`zam new` 覆盖骨架内容、生成的项目能直接 `check`、目录已存在时拒绝且不覆盖、非法项目名被拒绝。
 
 当前实现只是语言草案的一部分，多数功能还未实现；已在文档中标注的能力之外，语法与库都可能变化。
