@@ -25,7 +25,8 @@ fn execute() -> project::Result<()> {
             project::run_artifact(&artifact)?;
         }
         Some("demo") if args.len() == 1 => demo()?,
-        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact]\n  zam demo", env!("CARGO_PKG_VERSION")),
+        Some("--version") | Some("-V") => println!("{}", env!("CARGO_PKG_VERSION")),
+        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
         _ => return Err("usage: zam <check|build|run> [project|file]".into()),
     }
     Ok(())
