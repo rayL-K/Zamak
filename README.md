@@ -14,7 +14,7 @@ Zamak 是为频繁构建、多 worktree 协作设计的语言原型。当前 `za
 
 ### 生态现状
 
-如实标注：只有 `check`、`build`、`run`、`demo` 四个子命令。标准库停在起步阶段（`std/string` 的 `byte_len`/`char_len`/`equal`，`std/io`、`std/fmt` 的 `println`）；没有包管理器、调试器、REPL、IDE 插件和文档生成；错误值只做到 `T!string` 与 `?`/`fail`/`catch`（其他错误类型、格式化、安装/发行流程尚未提供）；泛型、闭包、枚举、match、线程和 unsafe/FFI 都还没有。因此当前只适合作为原型和小规模示例，不适合生产使用。
+如实标注：只有 `check`、`build`、`run`、`demo` 四个子命令（外加 `--help`/`--version`）。标准库停在起步阶段（`std/string` 的 `byte_len`/`char_len`/`equal`，`std/io`、`std/fmt` 的 `println`）；编辑器支持只有一份做语法高亮的 VS Code 扩展（`editors/vscode/`，无语言服务器/补全/调试器/格式化），另有仓库内的 AI 技能说明（`.agents/skills/zamak/`）；没有包管理器、REPL 和文档生成；错误值只做到 `T!string` 与 `?`/`fail`/`catch`（其他错误类型、格式化、安装/发行流程尚未提供）；泛型、闭包、枚举、match、线程和 unsafe/FFI 都还没有。因此当前只适合作为原型和小规模示例，不适合生产使用。
 
 ## 快速运行
 
@@ -31,9 +31,10 @@ zam check examples/hello
 zam build examples/hello
 zam run examples/hello
 zam demo
+zam --version
 ```
 
-进入项目目录后可以省略路径，例如在 `examples/hello` 中执行 `zam run`。
+进入项目目录后可以省略路径，例如在 `examples/hello` 中执行 `zam run`。`zam` 本身就是 Zamak 的编译器（前端在 `zam/src/compiler.rs`，C 后端在 `zam/src/native.rs`，构建与缓存在 `zam/src/project.rs`）；它复用系统 C 编译器完成机器码生成，所以生成的产物不依赖 Zamak 或 Rust。
 
 运行示例输出：
 
@@ -45,6 +46,12 @@ hello from zamak
 `build` 输出 `OUTPUT <path>`，Windows 上是 `build/<name>-<hash>.exe`，Unix 上是同名的无后缀可执行文件，可以直接启动，也可用 `zam run <path>` 执行。产物不需要安装 Zamak 或 Rust；Windows 静态链接 C 运行库。命令失败返回非零退出码，错误写入 stderr。词法/语法错误包含源码文件、行号与列号；列号从 1 开始，按 Unicode 字符计数，制表符算一个字符，EOF 使用末尾位置。词法错误指向 token 起点，语法错误指向解析器发现错误的位置。语义错误包含行号、列号与所属函数，位置取当前语句的起点（`missing string return value` 取函数声明处）；因为一个模块对应一个文件，函数前面的模块名即可定位文件。没有路径参数时使用当前目录；源码后缀统一为 `.zm`；可以直接检查或构建单个源码文件。
 
 Windows 构建需要 Visual Studio C++ 工具，自动通过 `vswhere` 查找 x64 MSVC。本机已安装。Unix 后端调用 `cc`，可通过 `CC` 指定编译器程序；已在 Ubuntu 26.04 + gcc 15.2 上实机验证构建、执行和全部集成回归。`check` 不需要 C 编译器。旧 `.zbc` 产物已不再支持，需要重新构建。
+
+## 编辑器与 AI 工具
+
+- **VS Code 语法扩展**：`editors/vscode/`。纯声明式（一份 TextMate 语法 + 语言配置，没有 `main`、没有运行时依赖、不联网），提供 `.zm` 文件的关键字/类型/字符串插值/注释高亮与括号、引号配对；同一份 `syntaxes/zamak.tmLanguage.json` 也可给 Sublime Text、TextMate 等支持 TextMate 语法的编辑器复用。本地安装、打包 `.vsix` 与上架市场的步骤见 `editors/vscode/README.md`。
+- **AI 技能**：`.agents/skills/zamak/SKILL.md`。面向遵循 `.agents/skills` 约定的 AI 编程代理（DSH、Claude Code 等）：命令与环境变量、语法速览、常见诊断文本、示例与测试的位置，以及修改编译器本身时的验收命令和 IR/缓存版本号规则。
+- **CLI**：就是 `zam` 本身（`check`/`build`/`run`/`demo`、`--help`、`--version`，缓存目录可用 `ZAMAK_CACHE_DIR` 覆盖）。还没有包管理器，也没有格式化子命令。
 
 ## 项目配置
 
@@ -122,7 +129,10 @@ Windows 编译使用 `/Brepro` 与 `/d2pathmap` 将临时目录映射为固定�
 ```powershell
 cargo test --manifest-path zam/Cargo.toml
 cargo clippy --manifest-path zam/Cargo.toml --all-targets -- -D warnings
+node editors/vscode/scripts/check-grammar.mjs
 ```
+
+最后一条校验编辑器扩展的声明式配置：三个 JSON 可解析、TextMate 语法里每条正则可编译、语言 id / 后缀 / `scopeName` / 仓库分组引用互相一致。
 
 集成检查覆盖跨目录缓存复用、原生产物一致性、独立执行、中文输出、依赖变更和独立模块命中、四个进程共享冷缓存、缓存损坏、语法错误、可见性、依赖环和配置路径校验。另覆盖字符串移动、借用修改、返回、重新初始化、重复共享借用，以及移动后使用、借用冲突/逃逸、错误参数和不可变赋值等反例；字符串插值覆盖中文字面量、整数/布尔/字段读取、非移动读取，以及未闭合、嵌套、未知变量和移动后使用等拒绝；诊断覆盖词法/语法错误的文件与行列，以及语义错误的行列与函数定位。错误值覆盖 `?` 的跨函数传播、未捕获错误写 stderr 并以退出码 1 结束、`catch` 就地处理（成功与失败两条路径），以及漏写 `?`、无错误签名函数里的 `?`/`fail`、非 `string` 错误类型、catch 代码块不返回、对不可失败调用 catch、catch 绑定撞名等反例。
 
