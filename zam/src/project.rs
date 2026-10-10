@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type Result<T> = std::result::Result<T, String>;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-16");
+const VERSION: &str = concat!("zam-", env!("CARGO_PKG_VERSION"), "-native-c-17");
 
 pub fn hash(parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
@@ -326,7 +326,8 @@ impl Project {
                 | Instruction::AssignField(_, _, expr)
                 | Instruction::AssignIndex(_, _, expr)
                 | Instruction::Print(expr)
-                | Instruction::Call(expr) => Some(expr),
+                | Instruction::Call(expr)
+                | Instruction::Fail(expr) => Some(expr),
                 Instruction::Return(expr) => expr.as_mut(),
                 Instruction::If(condition, yes, no) => {
                     self.resolve_body(module, yes)?;
@@ -421,9 +422,10 @@ impl Project {
                     self.resolve_expr(module, arg)?;
                 }
             }
-            Expr::Unary(_, value) | Expr::ByteLen(value) | Expr::CharLen(value) => {
-                self.resolve_expr(module, value)?
-            }
+            Expr::Unary(_, value)
+            | Expr::ByteLen(value)
+            | Expr::CharLen(value)
+            | Expr::Try(value) => self.resolve_expr(module, value)?,
             Expr::Array(values) => {
                 for value in values {
                     self.resolve_expr(module, value)?;

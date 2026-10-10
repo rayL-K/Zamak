@@ -30,6 +30,7 @@ pub enum Expr {
     Variable(String),
     Borrow(String, bool),
     Call(String, Vec<Expr>),
+    Try(Box<Expr>),
     ByteLen(Box<Expr>),
     CharLen(Box<Expr>),
     StringEqual(Box<Expr>, Box<Expr>),
@@ -49,6 +50,7 @@ pub enum Instruction {
     AssignIndex(String, Expr, Expr),
     Print(Expr),
     Call(Expr),
+    Fail(Expr),
     Return(Option<Expr>),
     If(Expr, Block, Block),
     While(Expr, Block),
@@ -61,6 +63,7 @@ pub struct Function {
     pub public: bool,
     pub params: Vec<(String, Type)>,
     pub result: Type,
+    pub error: Option<Type>,
     pub body: Block,
     pub position: SourcePosition,
 }
@@ -166,7 +169,9 @@ fn lex(source: &str) -> Result<(Vec<Token>, Vec<SourcePosition>), String> {
                     tokens.push(Token::Number(number.replace('_', "")));
                 }
                 '(' | ')' | '{' | '}' | '[' | ']' | '/' | '.' | ':' | ',' | '=' | '&' | '-'
-                | '>' | '<' | '+' | '*' | '%' | '!' | '|' | ';' => tokens.push(Token::Symbol(c)),
+                | '>' | '<' | '+' | '*' | '%' | '!' | '|' | ';' | '?' => {
+                    tokens.push(Token::Symbol(c))
+                }
                 _ => return Err(format!("unexpected character {c:?}")),
             }
             Ok(())
@@ -428,7 +433,12 @@ impl Parser {
                 self.expect(',')?;
             }
         }
-        Ok(Expr::Call(name, args))
+        let call = Expr::Call(name, args);
+        // `?` 只作用于调用；其他位置的 `?` 不是合法语法。
+        if self.symbol('?') {
+            return Ok(Expr::Try(Box::new(call)));
+        }
+        Ok(call)
     }
     fn if_statement(&mut self, imports: &[String], result: Type) -> Result<Instruction, String> {
         let condition = self.expr()?;
@@ -493,6 +503,9 @@ impl Parser {
                     Some(self.expr()?)
                 };
                 Instruction::Return(expr)
+            } else if self.keyword("fail") {
+                // `fail e` 在声明了错误类型的函数里返回错误值。
+                Instruction::Fail(self.expr()?)
             } else {
                 let expr = self.expr()?;
                 if let Expr::Field(local, field) = &expr {
@@ -703,18 +716,25 @@ pub fn parse(source: &str) -> Result<Module, String> {
                     p.expect(',')?;
                 }
             }
-            let result = if p.symbol('-') {
+            let (result, error) = if p.symbol('-') {
                 p.expect('>')?;
-                let ty = p.ty()?;
-                if matches!(ty, Type::Shared | Type::Mutable) {
-                    return Err("borrow escape: functions cannot return references".into());
+                // `-> !E` 表示没有成功值、只有错误值。
+                if p.symbol('!') {
+                    let error = p.ty()?;
+                    (Type::Unit, Some(error))
+                } else {
+                    let ty = p.ty()?;
+                    if matches!(ty, Type::Shared | Type::Mutable) {
+                        return Err("borrow escape: functions cannot return references".into());
+                    }
+                    if matches!(ty, Type::ArrayInt(_)) {
+                        return Err("arrays are only supported as local values".into());
+                    }
+                    let error = if p.symbol('!') { Some(p.ty()?) } else { None };
+                    (ty, error)
                 }
-                if matches!(ty, Type::ArrayInt(_)) {
-                    return Err("arrays are only supported as local values".into());
-                }
-                ty
             } else {
-                Type::Unit
+                (Type::Unit, None)
             };
             let body = p.block(&module.imports, result)?;
             if module
@@ -725,6 +745,7 @@ pub fn parse(source: &str) -> Result<Module, String> {
                         public,
                         params,
                         result,
+                        error,
                         body,
                         position: start,
                     },
@@ -752,7 +773,7 @@ pub fn encode(module: &Module) -> Vec<u8> {
         .map(|(name, structure)| (name, structure.public, &structure.fields))
         .collect();
     format!(
-        "ZAM-IR-10\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
+        "ZAM-IR-11\n{declarations:?}\n{:?}\n{:?}\n{:?}\n",
         module.type_names, module.imports, module.functions
     )
     .into_bytes()
@@ -798,6 +819,8 @@ struct Checker<'a> {
     locals: BTreeMap<String, Binding>,
     loops: Vec<(BTreeMap<String, Binding>, Expr)>,
     position: SourcePosition,
+    // 当前函数的错误类型（`-> T!E` 的 E）；`?`/`fail` 依赖它。
+    error: Option<Type>,
 }
 impl Checker<'_> {
     fn binding(&self, name: &str) -> Result<&Binding, String> {
@@ -841,6 +864,8 @@ impl Checker<'_> {
                 .get(name)
                 .map(|f| f.result)
                 .ok_or_else(|| format!("unknown function {name}")),
+            // `?` 的值就是被调函数的成功值。
+            Expr::Try(inner) => self.ty(inner),
             Expr::Unary(op, _) => Ok(if *op == '!' { Type::Bool } else { Type::Int }),
             Expr::Binary(op, _, _) => Ok(if matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
                 Type::Int
@@ -1057,24 +1082,57 @@ impl Checker<'_> {
                     .get(name)
                     .ok_or_else(|| format!("unknown function {name}"))?
                     .clone();
-                if callee.result != expected {
-                    return Err(format!("return type mismatch for {name}"));
+                // 会失败的调用必须先被 `?` 或 `catch` 处理，错误值不会静默丢弃。
+                if callee.error.is_some() {
+                    return Err(format!("fallible call {name} must be handled with ?"));
                 }
-                if callee.params.len() != args.len() {
-                    return Err(format!("argument count mismatch for {name}"));
+                self.call(name, &callee, args, expected, loans)
+            }
+            Expr::Try(inner) => {
+                let Expr::Call(name, args) = &**inner else {
+                    return Err("? requires a function call".into());
+                };
+                let callee = self
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| format!("unknown function {name}"))?
+                    .clone();
+                let error = callee
+                    .error
+                    .ok_or_else(|| format!("? requires a fallible call, but {name} cannot fail"))?;
+                if Some(error) != self.error {
+                    return Err(format!(
+                        "? cannot propagate the error of {name} from this function"
+                    ));
                 }
-                // Nested calls inherit outer loans; their own loans end when they return.
-                let mut frame = loans.clone();
-                for (arg, (_, ty)) in args.iter().zip(&callee.params) {
-                    self.expr(arg, *ty, &mut frame)?;
-                }
-                Ok(())
+                self.call(name, &callee, args, expected, loans)
             }
             Expr::Borrow(_, _) => {
                 Err("borrow escape: references only belong in call arguments".into())
             }
             _ => Err("string type mismatch".into()),
         }
+    }
+    fn call(
+        &mut self,
+        name: &str,
+        callee: &Function,
+        args: &[Expr],
+        expected: Type,
+        loans: &mut BTreeMap<String, Type>,
+    ) -> Result<(), String> {
+        if callee.result != expected {
+            return Err(format!("return type mismatch for {name}"));
+        }
+        if callee.params.len() != args.len() {
+            return Err(format!("argument count mismatch for {name}"));
+        }
+        // Nested calls inherit outer loans; their own loans end when they return.
+        let mut frame = loans.clone();
+        for (arg, (_, ty)) in args.iter().zip(&callee.params) {
+            self.expr(arg, *ty, &mut frame)?;
+        }
+        Ok(())
     }
     fn block(&mut self, body: &Block, result: Type) -> Result<bool, String> {
         let outer_names = self.locals.keys().cloned().collect();
@@ -1243,13 +1301,23 @@ impl Checker<'_> {
                             .result
                     } else if matches!(
                         expr,
-                        Expr::ByteLen(_) | Expr::CharLen(_) | Expr::StringEqual(_, _)
+                        Expr::ByteLen(_)
+                            | Expr::CharLen(_)
+                            | Expr::StringEqual(_, _)
+                            | Expr::Try(_)
                     ) {
                         self.ty(expr)?
                     } else {
                         return Err("expected function call".into());
                     };
                     self.expr(expr, ty, &mut loans)?;
+                }
+                Instruction::Fail(expr) => {
+                    let error = self
+                        .error
+                        .ok_or("fail requires a function that declares an error type")?;
+                    self.expr(expr, error, &mut loans)?;
+                    returned = true;
                 }
                 Instruction::Return(expr) => {
                     if let Some(expr) = expr {
@@ -1321,8 +1389,13 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
             locals: BTreeMap::new(),
             loops: Vec::new(),
             position: function.position,
+            error: function.error,
         };
         let result = (|| {
+            // ponytail: v1 只支持 string 错误类型；泛化 E 是纯增量（C 侧结果结构体按 E 再分一个维度）。
+            if function.error.is_some_and(|ty| ty != Type::Owned) {
+                return Err("only string error types are supported for now".into());
+            }
             let mut names = BTreeSet::new();
             for (param, ty) in &function.params {
                 if !names.insert(param.clone()) {

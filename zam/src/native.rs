@@ -60,6 +60,11 @@ static int string_equal(S *a, S *b) { return a->len == b->len && (!a->len || mem
 static void print(S *s) {
     if ((s->len && fwrite(s->data, 1, s->len, stdout) != s->len) || fputc('\n', stdout) == EOF) exit(1);
 }
+// ponytail: 未捕获的错误只写 stderr 并以退出码 1 结束；不做栈回溯，错误值本身就是全部信息。
+static void uncaught_error(S *s) {
+    if (s->len && fwrite(s->data, 1, s->len, stderr) != s->len) exit(1);
+    if (fputc('\n', stderr) == EOF) exit(1);
+}
 static S copy(S *s) { return own(s->data, s->len); }
 static S cat(S a, S b) {
     size_t n = a.len + b.len;
@@ -88,6 +93,19 @@ struct Generator<'a> {
     loops: Vec<usize>,
     code: String,
     next: usize,
+    // 当前函数的签名：`?` 提前返回时要构造同样形状的结果结构体。
+    result: Type,
+    error: Option<Type>,
+}
+// 失败函数的结果结构体：ok=1 时 value 有效，ok=0 时 error 有效。
+fn fallible_name(ty: Type) -> String {
+    format!("F_{}", ctype(ty))
+}
+fn fallible_ok(ty: Type) -> String {
+    format!("{}_ok", fallible_name(ty))
+}
+fn fallible_err(ty: Type) -> String {
+    format!("{}_err", fallible_name(ty))
 }
 fn drop_fn(ty: Type) -> String {
     if matches!(ty, Type::Record(_)) {
@@ -134,6 +152,7 @@ impl Generator<'_> {
                 }
             }
             Expr::Call(name, _) => self.module.functions[name].result,
+            Expr::Try(inner) => self.ty(inner),
             Expr::Unary(op, _) => {
                 if *op == '!' {
                     Type::Bool
@@ -378,40 +397,77 @@ impl Generator<'_> {
             Expr::Variable(name) => self.temporary(&format!("take({})", self.pointer(name))),
             Expr::Borrow(name, _) => self.pointer(name),
             Expr::Call(name, args) => {
-                let function = &self.module.functions[name];
-                let types: Vec<_> = function.params.iter().map(|(_, ty)| *ty).collect();
-                let result = function.result;
-                let mut values = Vec::new();
-                for (arg, ty) in args.iter().zip(types) {
-                    values.push(if let Type::Record(_) = ty {
-                        let value = self.expr(arg);
-                        format!("take{}(&{value})", ctype(ty))
-                    } else if ty == Type::Owned {
-                        let value = self.expr(arg);
-                        format!("take(&{value})")
-                    } else if matches!(ty, Type::Int | Type::Bool) {
-                        self.expr(arg)
-                    } else {
-                        match arg {
-                            Expr::Variable(local) | Expr::Borrow(local, _) => self.pointer(local),
-                            _ => unreachable!(),
-                        }
-                    });
+                let result = self.module.functions[name].result;
+                let call = self.raw_call(name, args);
+                self.call_value(&call, result)
+            }
+            Expr::Try(inner) => {
+                let Expr::Call(name, args) = &**inner else {
+                    unreachable!("checked ? operand")
+                };
+                let result = self.module.functions[name].result;
+                let call = self.raw_call(name, args);
+                let structure = fallible_name(result);
+                let temp = format!("v{}", self.next);
+                self.next += 1;
+                self.code
+                    .push_str(&format!("{structure} {temp} = {call};\n"));
+                // 失败：先把当前作用域的值都释放掉，再构造同样形状的错误结果返回。
+                self.code.push_str(&format!("if (!{temp}.ok) {{\n"));
+                let outer = fallible_err(self.result);
+                self.cleanup();
+                self.code
+                    .push_str(&format!("return {outer}(take(&{temp}.error));\n}}\n"));
+                if result == Type::Unit {
+                    return String::new();
                 }
-                let call = format!("{}({})", self.symbols[name], values.join(", "));
-                if result == Type::Owned {
-                    self.temporary(&call)
-                } else if result != Type::Unit {
-                    let value = self.scalar(&call, result);
-                    if matches!(result, Type::Record(_)) {
-                        self.owners.push((value.clone(), result));
-                    }
+                if matches!(result, Type::Record(_)) {
+                    let value =
+                        self.scalar(&format!("take{}(&{temp}.value)", ctype(result)), result);
+                    self.owners.push((value.clone(), result));
                     value
+                } else if result == Type::Owned {
+                    self.temporary(&format!("take(&{temp}.value)"))
                 } else {
-                    self.code.push_str(&format!("{call};\n"));
-                    String::new()
+                    self.scalar(&format!("{temp}.value"), result)
                 }
             }
+        }
+    }
+    fn raw_call(&mut self, name: &str, args: &[Expr]) -> String {
+        let function = &self.module.functions[name];
+        let types: Vec<_> = function.params.iter().map(|(_, ty)| *ty).collect();
+        let mut values = Vec::new();
+        for (arg, ty) in args.iter().zip(types) {
+            values.push(if let Type::Record(_) = ty {
+                let value = self.expr(arg);
+                format!("take{}(&{value})", ctype(ty))
+            } else if ty == Type::Owned {
+                let value = self.expr(arg);
+                format!("take(&{value})")
+            } else if matches!(ty, Type::Int | Type::Bool) {
+                self.expr(arg)
+            } else {
+                match arg {
+                    Expr::Variable(local) | Expr::Borrow(local, _) => self.pointer(local),
+                    _ => unreachable!(),
+                }
+            });
+        }
+        format!("{}({})", self.symbols[name], values.join(", "))
+    }
+    fn call_value(&mut self, call: &str, result: Type) -> String {
+        if result == Type::Owned {
+            self.temporary(call)
+        } else if result != Type::Unit {
+            let value = self.scalar(call, result);
+            if matches!(result, Type::Record(_)) {
+                self.owners.push((value.clone(), result));
+            }
+            value
+        } else {
+            self.code.push_str(&format!("{call};\n"));
+            String::new()
         }
     }
     fn block(&mut self, body: &Block, result_type: Type) -> bool {
@@ -550,11 +606,30 @@ impl Generator<'_> {
                             });
                     }
                     self.cleanup();
-                    self.code.push_str(if expr.is_some() {
-                        "return result;\n"
+                    if self.error.is_some() {
+                        // 失败函数：成功值要包进结果结构体。
+                        let ok = fallible_ok(result_type);
+                        self.code.push_str(&if expr.is_some() {
+                            format!("return {ok}(result);\n")
+                        } else {
+                            format!("return {ok}();\n")
+                        });
                     } else {
-                        "return;\n"
-                    });
+                        self.code.push_str(if expr.is_some() {
+                            "return result;\n"
+                        } else {
+                            "return;\n"
+                        });
+                    }
+                    returned = true;
+                }
+                Instruction::Fail(expr) => {
+                    let value = self.expr(expr);
+                    self.code
+                        .push_str(&format!("S failure = take(&{value});\n"));
+                    self.cleanup();
+                    self.code
+                        .push_str(&format!("return {}(failure);\n", fallible_err(self.result)));
                     returned = true;
                 }
             }
@@ -605,7 +680,11 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
             .collect::<Vec<_>>();
         format!(
             "{} {}({})",
-            ctype(function.result),
+            if function.error.is_some() {
+                fallible_name(function.result)
+            } else {
+                ctype(function.result)
+            },
             symbols[name],
             if params.is_empty() {
                 "void".into()
@@ -638,6 +717,7 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
             Expr::Unary(_, value) | Expr::ByteLen(value) | Expr::CharLen(value) => {
                 calls(value, needed, records)
             }
+            Expr::Try(inner) => calls(inner, needed, records),
             Expr::Array(values) => {
                 for value in values {
                     calls(value, needed, records);
@@ -663,7 +743,8 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
                 | Instruction::AssignField(_, _, expr)
                 | Instruction::AssignIndex(_, _, expr)
                 | Instruction::Print(expr)
-                | Instruction::Call(expr) => calls(expr, needed, records),
+                | Instruction::Call(expr)
+                | Instruction::Fail(expr) => calls(expr, needed, records),
                 Instruction::Return(Some(expr)) => calls(expr, needed, records),
                 Instruction::If(expr, yes, no) => {
                     calls(expr, needed, records);
@@ -732,6 +813,41 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
         }
         source.push_str(&format!("memset(p,0,sizeof(*p)); }}\nstatic R{id} takeR{id}(R{id} *p) {{ R{id} v=*p; memset(p,0,sizeof(*p)); return v; }}\n"));
     }
+    // 失败函数的结果结构体与构造器；调用点只读 ok 相符的那一半。
+    let mut fallible: Vec<Type> = Vec::new();
+    for name in &needed {
+        let result = module.functions[name].result;
+        if module.functions[name].error.is_some() && !fallible.contains(&result) {
+            fallible.push(result);
+        }
+    }
+    for ty in &fallible {
+        let structure = fallible_name(*ty);
+        source.push_str(&format!(
+            "typedef struct {{ int ok; {}S error; }} {structure};\n",
+            if *ty == Type::Unit {
+                String::new()
+            } else {
+                format!("{} value; ", ctype(*ty))
+            }
+        ));
+        if *ty == Type::Unit {
+            source.push_str(&format!(
+                "static {structure} {}(void) {{ {structure} r = {{0}}; r.ok = 1; return r; }}\n",
+                fallible_ok(*ty)
+            ));
+        } else {
+            source.push_str(&format!(
+                "static {structure} {}({} value) {{ {structure} r = {{0}}; r.ok = 1; r.value = value; return r; }}\n",
+                fallible_ok(*ty),
+                ctype(*ty)
+            ));
+        }
+        source.push_str(&format!(
+            "static {structure} {}(S error) {{ {structure} r = {{0}}; r.error = error; return r; }}\n",
+            fallible_err(*ty)
+        ));
+    }
     for name in &needed {
         source.push_str(&format!("{};\n", signature(name)));
     }
@@ -748,6 +864,8 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
             loops: Vec::new(),
             code: String::new(),
             next: 0,
+            result: function.result,
+            error: function.error,
         };
         for (i, (param, ty)) in function.params.iter().enumerate() {
             let local = format!("p{i}");
@@ -756,16 +874,28 @@ pub fn generate(module: &Module, entry: &str, unit: &str) -> String {
             }
             g.locals.insert(param.clone(), (local, *ty));
         }
-        g.block(&function.body, function.result);
+        let returned = g.block(&function.body, function.result);
         g.cleanup();
         source.push_str(&g.code);
+        if function.error.is_some() && !returned && function.result == Type::Unit {
+            // 失败函数返回 Unit 时也要显式给出成功值。
+            source.push_str(&format!("return {}();\n", fallible_ok(Type::Unit)));
+        }
         source.push_str("}\n");
     }
     if entry.split_once(':').unwrap().0 == unit {
-        source.push_str(&format!(
-            "int main(void) {{ output_mode(); {}(); return fflush(stdout) == EOF ? 1 : 0; }}\n",
-            symbols[entry]
-        ));
+        if module.functions[entry].error.is_some() {
+            let structure = fallible_name(module.functions[entry].result);
+            source.push_str(&format!(
+                "int main(void) {{ output_mode(); {structure} r = {}(); if (!r.ok) {{ uncaught_error(&r.error); return 1; }} return fflush(stdout) == EOF ? 1 : 0; }}\n",
+                symbols[entry]
+            ));
+        } else {
+            source.push_str(&format!(
+                "int main(void) {{ output_mode(); {}(); return fflush(stdout) == EOF ? 1 : 0; }}\n",
+                symbols[entry]
+            ));
+        }
     }
     source
 }
