@@ -1,0 +1,18 @@
+fn main() {
+    let mut outer = 0
+    while outer < 3 {
+        outer = outer + 1
+        let mut inner = 0
+        while inner < 3 {
+            inner = inner + 1
+            if inner == 1 {
+                continue
+            }
+            println(inner)
+            if outer == 2 {
+                break
+            }
+        }
+        println(outer)
+    }
+}

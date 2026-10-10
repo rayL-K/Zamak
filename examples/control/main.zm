@@ -1,0 +1,40 @@
+fn factorial(n: i64) -> i64 {
+    let mut i = n
+    let mut result = 1
+    while i > 1 {
+        result = result * i
+        i = i - 1
+    }
+    return result
+}
+fn gcd(a: i64, b: i64) -> i64 {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let remainder = x % y
+        x = y
+        y = remainder
+    }
+    return x
+}
+fn choose(flag: bool, text: string) -> string {
+    if flag {
+        return text
+    } else {
+        return "other"
+    }
+}
+fn main() {
+    println(factorial(10))
+    println(gcd(48, 18))
+    println(choose(true, "branch"))
+    let mut i = 0
+    let mut owner = "first"
+    while i < 3 {
+        let moved = owner
+        println(moved)
+        owner = "next"
+        i = i + 1
+    }
+    println(owner)
+}

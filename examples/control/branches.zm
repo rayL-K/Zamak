@@ -1,0 +1,18 @@
+fn classify(n: i64) -> string {
+    if n < 0 {
+        return "negative"
+    } else if n == 0 {
+        return "zero"
+    } else if n == 1 {
+        return "one"
+    } else {
+        return "many"
+    }
+}
+
+fn main() {
+    println(classify(-1))
+    println(classify(0))
+    println(classify(1))
+    println(classify(2))
+}

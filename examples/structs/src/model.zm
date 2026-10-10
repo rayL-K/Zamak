@@ -1,0 +1,19 @@
+pub struct Person {
+    name: string
+    age: i64
+    active: bool
+}
+
+pub fn create(name: string) -> Person {
+    Person {
+        name: name
+        age: 41
+        active: true
+    }
+}
+
+pub fn birthday(person: Person) -> Person {
+    let mut result = person
+    result.age = result.age + 1
+    result
+}

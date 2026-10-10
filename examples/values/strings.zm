@@ -1,0 +1,21 @@
+use std/string
+
+fn size(text: &string) -> i64 {
+    string.byte_len(text)
+}
+
+struct Person { name: string }
+
+fn main() {
+    let text = "你好"
+    println(size(&text))
+    println(text)
+    let empty = ""
+    println(string.byte_len(&empty))
+    let same = "你好"
+    println(string.equal(&text, &same))
+    println(string.equal(&text, &empty))
+    let person = Person { name: "你好" }
+    println(string.byte_len(&person.name))
+    println(string.equal(&person.name, &text))
+}

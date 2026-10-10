@@ -1,0 +1,7 @@
+fn main() {
+    let mut values: [i64; 3] = [10, 20, 30]
+    println(values[0])
+    values[1] = values[0] + 5
+    println(values[1])
+    println(values[2])
+}

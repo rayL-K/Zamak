@@ -1,0 +1,10 @@
+# Declaration validation only; struct values are not implemented yet.
+pub struct Person {
+    name: string
+    age: i64
+    active: bool
+}
+
+fn main() {
+    println("struct declaration checked")
+}

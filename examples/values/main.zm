@@ -1,0 +1,12 @@
+fn twice(x: i64) -> i64 { x * 2 }
+fn invert(x: bool) -> bool { !x }
+fn main() {
+    let mut answer: i64 = 20
+    let original = answer
+    answer = twice(answer) + 2
+    println(answer)
+    println(original)
+    println(answer == 42)
+    println(invert(false))
+    println(1_000_000)
+}

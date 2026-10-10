@@ -1,0 +1,4 @@
+[project]
+name = "hello"
+entry = "src/main.zm"
+modules = "src"

@@ -1,0 +1,7 @@
+use greeting
+use std/io
+
+fn main() {
+    greeting.hello()
+    io.println("你好，Zamak")
+}
