@@ -499,7 +499,8 @@ impl Project {
                 }
                 Err(e) => return Err(e.to_string()),
             };
-            println!(
+            // ponytail: 进度走 stderr，stdout 留给程序输出与 --json 的机器可读结果。
+            eprintln!(
                 "CACHE {} {:.12} {id}",
                 if hit { "HIT" } else { "MISS" },
                 keys[id]
@@ -521,7 +522,7 @@ impl Project {
             let (bytes, hit) = native_cached(cache, &key, "obj", |scratch| {
                 native::compile(&tool, scratch, &source)
             })?;
-            println!(
+            eprintln!(
                 "OBJECT {} {:.12} {id}",
                 if hit { "HIT" } else { "MISS" },
                 key
@@ -538,7 +539,7 @@ impl Project {
         let (bytes, hit) = native_cached(cache, &app_key, "exe", |scratch| {
             native::link(&tool, scratch, &objects)
         })?;
-        println!("LINK {} {:.12}", if hit { "HIT" } else { "MISS" }, app_key);
+        eprintln!("LINK {} {:.12}", if hit { "HIT" } else { "MISS" }, app_key);
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         let artifact = self
             .root
@@ -551,7 +552,7 @@ impl Project {
             fs::set_permissions(&artifact, fs::Permissions::from_mode(0o755))
                 .map_err(|e| e.to_string())?;
         }
-        println!("OUTPUT {}", artifact.display());
+        eprintln!("OUTPUT {}", artifact.display());
         Ok(artifact)
     }
 }

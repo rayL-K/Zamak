@@ -6,10 +6,31 @@ use std::path::Path;
 
 fn execute() -> project::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let json = args.iter().any(|arg| arg == "--json");
+    let args: Vec<String> = args.into_iter().filter(|arg| arg != "--json").collect();
     if args.len() > 2 {
         return Err("usage: zam <check|build|run> [project|file]".into());
     }
     let input = Path::new(args.get(1).map(String::as_str).unwrap_or("."));
+    if json {
+        // ponytail: 只有 check/build 会产生诊断；其余命令直接拒绝，避免静默忽略。
+        let outcome = match args.first().map(String::as_str) {
+            Some("check") => project::Project::load(input).and_then(|project| project.check()),
+            Some("build") => project::Project::load(input)
+                .and_then(|project| project.build(&project::cache_dir()).map(|_| ())),
+            _ => return Err("--json is only supported by check and build".into()),
+        };
+        println!(
+            "{}",
+            report(
+                args.first().map(String::as_str).unwrap(),
+                &input.display().to_string(),
+                &outcome
+            )
+        );
+        // 失败时 main 仍会把人类可读的一行写到 stderr，stdout 保持是合法 JSON。
+        return outcome;
+    }
     match args.first().map(String::as_str) {
         Some("check") => {
             let project = project::Project::load(input)?;
@@ -26,10 +47,121 @@ fn execute() -> project::Result<()> {
         }
         Some("demo") if args.len() == 1 => demo()?,
         Some("--version") | Some("-V") => println!("{}", env!("CARGO_PKG_VERSION")),
-        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
+        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam run [project|file|artifact]\n  zam check --json [project|file]\n  zam build --json [project|file]\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
         _ => return Err("usage: zam <check|build|run> [project|file]".into()),
     }
     Ok(())
+}
+
+///把一次命令的结果渲染成一行 JSON，供编辑器等工具读取。
+fn report(command: &str, entry: &str, outcome: &project::Result<()>) -> String {
+    let items = match outcome {
+        Ok(()) => String::new(),
+        Err(error) => item(&diagnostic(entry, error)),
+    };
+    format!(
+        "{{\"command\":\"{command}\",\"ok\":{},\"diagnostics\":[{items}]}}",
+        outcome.is_ok()
+    )
+}
+
+struct Diagnostic {
+    file: String,
+    line: Option<usize>,
+    column: Option<usize>,
+    function: Option<String>,
+    message: String,
+}
+
+/// ponytail: 诊断目前是拼好的文本（`project::Result<T> = Result<T, String>`），这里按既有格式
+/// 反解成字段；等更多消费者（LSP、CI 注解）出现时，再改成贯穿编译器的结构化 Diagnostic。
+fn diagnostic(entry: &str, error: &str) -> Diagnostic {
+    let (file, rest) = match error.split_once(": line ") {
+        Some((head, tail)) => (head.to_string(), format!("line {tail}")),
+        None => (entry.to_string(), error.to_string()),
+    };
+    let (position, rest) = match rest.split_once(": ") {
+        Some((head, tail)) if head.starts_with("line ") => (head.to_string(), tail.to_string()),
+        _ => (String::new(), rest),
+    };
+    let (line, column) = match position.split_once(", ") {
+        Some((line, column)) => (
+            line.strip_prefix("line ")
+                .and_then(|n| n.trim().parse().ok()),
+            column
+                .strip_prefix("column ")
+                .and_then(|n| n.trim().parse().ok()),
+        ),
+        None => (None, None),
+    };
+    let (function, message) = match rest.split_once(": ") {
+        Some((head, tail)) => {
+            let mut parts = head.split(':');
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some(module), Some(name), None)
+                    if identifier(module, true) && identifier(name, false) =>
+                {
+                    (Some(format!("{module}:{name}")), tail.to_string())
+                }
+                _ => (None, rest.clone()),
+            }
+        }
+        None => (None, rest.clone()),
+    };
+    Diagnostic {
+        file,
+        line,
+        column,
+        function,
+        message,
+    }
+}
+
+/// 诊断里的 `<模块>:<函数>` 前缀只用标识符字符，磁盘路径与普通句子不会误判。
+fn identifier(text: &str, slash: bool) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || (slash && c == '/'))
+}
+
+fn item(diagnostic: &Diagnostic) -> String {
+    format!(
+        "{{\"file\":{},\"line\":{},\"column\":{},\"function\":{},\"message\":{}}}",
+        text(Some(&diagnostic.file)),
+        number(diagnostic.line),
+        number(diagnostic.column),
+        text(diagnostic.function.as_deref()),
+        text(Some(&diagnostic.message)),
+    )
+}
+
+fn number(value: Option<usize>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| value.to_string())
+}
+
+fn text(value: Option<&str>) -> String {
+    value.map_or_else(
+        || "null".to_string(),
+        |value| format!("\"{}\"", escape(value)),
+    )
+}
+
+fn escape(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn demo() -> project::Result<()> {
@@ -70,5 +202,73 @@ fn main() {
     if let Err(error) = execute() {
         eprintln!("zam: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(entry: &str, error: &str) -> Diagnostic {
+        diagnostic(entry, error)
+    }
+
+    #[test]
+    fn diagnostics_parse_every_shape() {
+        let with_file = parse(
+            "entry.zm",
+            r"C:\a\main.zm: line 3, column 9: unexpected character",
+        );
+        assert_eq!(with_file.file, r"C:\a\main.zm");
+        assert_eq!((with_file.line, with_file.column), (Some(3), Some(9)));
+        assert_eq!(with_file.function, None);
+        assert_eq!(with_file.message, "unexpected character");
+
+        // 语义诊断由 project::check 传 <模块>:main 名字，消息里还可能出现别的冒号。
+        let semantic = parse(
+            "entry.zm",
+            "line 6, column 5: main:main: fallible call main:f must be handled with ?",
+        );
+        assert_eq!(semantic.file, "entry.zm");
+        assert_eq!(semantic.function.as_deref(), Some("main:main"));
+        assert_eq!(
+            semantic.message,
+            "fallible call main:f must be handled with ?"
+        );
+
+        // 与位置无关的错误保留整段原文，位置为空。
+        let plain = parse("entry.zm", "missing entry module main");
+        assert_eq!(
+            (plain.line, plain.column, plain.function),
+            (None, None, None)
+        );
+        assert_eq!(plain.message, "missing entry module main");
+
+        // 路径里的冒号不能当成 <模块>:<函数> 前缀。
+        let config = parse("entry.zm", r"C:\p\zam.toml: missing string project.name");
+        assert_eq!(config.file, "entry.zm");
+        assert_eq!(config.function, None);
+        assert_eq!(
+            config.message,
+            r"C:\p\zam.toml: missing string project.name"
+        );
+    }
+
+    #[test]
+    fn report_is_one_line_json() {
+        let ok: project::Result<()> = Ok(());
+        assert_eq!(
+            report("build", "entry.zm", &ok),
+            r#"{"command":"build","ok":true,"diagnostics":[]}"#
+        );
+
+        let failed: project::Result<()> =
+            Err(r#"C:\a\main.zm: line 1, column 2: bad "quote""#.into());
+        let line = report("check", "entry.zm", &failed);
+        assert_eq!(line.lines().count(), 1);
+        assert_eq!(
+            line,
+            r#"{"command":"check","ok":false,"diagnostics":[{"file":"C:\\a\\main.zm","line":1,"column":2,"function":null,"message":"bad \"quote\""}]}"#
+        );
     }
 }

@@ -31,6 +31,16 @@ fn successful(output: Output) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// 构建进度（CACHE/OBJECT/LINK/OUTPUT）走 stderr，stdout 只留程序输出与 --json 结果。
+fn progress(output: &Output) -> String {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
 fn fixture(root: &Path) {
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(
@@ -72,10 +82,10 @@ fn project_cache_execution_and_failures() {
     fixture(&b);
     successful(invoke(&a, &cache, "check"));
     assert!(!cache.exists(), "check must not write cache");
-    let first = successful(invoke(&a, &cache, "build"));
+    let first = progress(&invoke(&a, &cache, "build"));
     assert_eq!(first.matches("CACHE MISS").count(), 3);
     assert_eq!(first.matches("OBJECT MISS").count(), 3);
-    let second = successful(invoke(&b, &cache, "build"));
+    let second = progress(&invoke(&b, &cache, "build"));
     assert_eq!(second.matches("CACHE HIT").count(), 3);
     assert_eq!(second.matches("OBJECT HIT").count(), 3);
     assert!(second.contains("LINK HIT"));
@@ -97,7 +107,7 @@ fn project_cache_execution_and_failures() {
         "pub fn hello() { println(\"changed\") }\n",
     )
     .unwrap();
-    let changed = successful(invoke(&b, &cache, "build"));
+    let changed = progress(&invoke(&b, &cache, "build"));
     assert_eq!(changed.matches("CACHE MISS").count(), 2);
     assert_eq!(changed.matches("CACHE HIT").count(), 1);
     assert_eq!(changed.matches("OBJECT MISS").count(), 1);
@@ -122,7 +132,7 @@ fn project_cache_execution_and_failures() {
         "use greet\nfn main() { greet.hello(7) }\n",
     )
     .unwrap();
-    let interface = successful(invoke(&b, &cache, "build"));
+    let interface = progress(&invoke(&b, &cache, "build"));
     assert_eq!(interface.matches("OBJECT MISS").count(), 2);
     assert_eq!(interface.matches("OBJECT HIT").count(), 1);
     assert_eq!(
@@ -135,7 +145,7 @@ fn project_cache_execution_and_failures() {
         "pub struct Unused { value: bool }\nfn quiet() {}\n",
     )
     .unwrap();
-    let unrelated = successful(invoke(&b, &cache, "build"));
+    let unrelated = progress(&invoke(&b, &cache, "build"));
     assert_eq!(unrelated.matches("OBJECT HIT").count(), 3);
     assert!(
         unrelated.contains("LINK HIT"),
@@ -146,7 +156,7 @@ fn project_cache_execution_and_failures() {
         "use unused\nfn main() {\nlet p = unused.Unused { value: true }\nprintln(p.value)\n}\n",
     )
     .unwrap();
-    let record = successful(invoke(&b, &cache, "build"));
+    let record = progress(&invoke(&b, &cache, "build"));
     assert_eq!(record.matches("OBJECT MISS").count(), 1);
     assert_eq!(
         successful(invoke(&artifact(&record), &cache, "run")),
@@ -166,14 +176,14 @@ fn project_cache_execution_and_failures() {
         "use unused\nfn main() {\nlet p = unused.Unused { value: 9 }\nprintln(p.value)\n}\n",
     )
     .unwrap();
-    let layout = successful(invoke(&b, &cache, "build"));
+    let layout = progress(&invoke(&b, &cache, "build"));
     assert_eq!(layout.matches("OBJECT MISS").count(), 1);
     assert_eq!(layout.matches("OBJECT HIT").count(), 2);
     assert_eq!(successful(invoke(&artifact(&layout), &cache, "run")), "9\n");
 
     fs::write(b.join("src/unused.zm"), "pub struct Unused { value: i64 }\npub fn make() -> Unused { Unused { value: 11 } }\npub fn relay(p: Unused) -> Unused { p }\nfn quiet() {}\n").unwrap();
     fs::write(b.join("src/main.zm"), "use unused\nfn main() {\nlet p: unused.Unused = unused.relay(unused.make())\nprintln(p.value)\n}\n").unwrap();
-    let passing = successful(invoke(&b, &cache, "build"));
+    let passing = progress(&invoke(&b, &cache, "build"));
     assert_eq!(
         successful(invoke(&artifact(&passing), &cache, "run")),
         "11\n"
@@ -186,13 +196,13 @@ fn project_cache_execution_and_failures() {
 
     fs::write(b.join("src/unused.zm"), "pub struct Unused { value: i64 }\npub fn make() -> Unused { Unused { value: 11 } }\nfn quiet() {}\n").unwrap();
     fs::write(b.join("src/main.zm"), "use unused\nstruct Wrapper { item: unused.Unused }\nfn main() {\nlet mut w = Wrapper { item: unused.make() }\nw.item = unused.make()\nprintln(12)\n}\n").unwrap();
-    let nested = successful(invoke(&b, &cache, "build"));
+    let nested = progress(&invoke(&b, &cache, "build"));
     assert_eq!(
         successful(invoke(&artifact(&nested), &cache, "run")),
         "12\n"
     );
     fs::write(b.join("src/unused.zm"), "pub struct Unused { value: bool }\npub fn make() -> Unused { Unused { value: true } }\nfn quiet() {}\n").unwrap();
-    let nested_layout = successful(invoke(&b, &cache, "build"));
+    let nested_layout = progress(&invoke(&b, &cache, "build"));
     assert_eq!(nested_layout.matches("OBJECT MISS").count(), 2);
     assert_eq!(nested_layout.matches("OBJECT HIT").count(), 1);
     assert_eq!(
@@ -217,7 +227,7 @@ fn project_cache_execution_and_failures() {
         );
     }
     for child in children {
-        successful(child.wait_with_output().unwrap());
+        progress(&child.wait_with_output().unwrap());
     }
     assert_eq!(fs::read_dir(&concurrent_cache).unwrap().count(), 11);
     let artifact_cache = fs::read_dir(&concurrent_cache)

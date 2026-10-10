@@ -47,10 +47,11 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stdout)
-        .ends_with("世界\nchanged\nchanged\nreturned\n\nembedded\ttext\n"));
     let stdout = String::from_utf8_lossy(&result.stdout);
-    let artifact = stdout
+    assert!(stdout.ends_with("世界\nchanged\nchanged\nreturned\n\nembedded\ttext\n"));
+    // 构建进度（含 OUTPUT）走 stderr，stdout 只剩程序输出。
+    let progress = String::from_utf8_lossy(&result.stderr);
+    let artifact = progress
         .lines()
         .find_map(|line| line.strip_prefix("OUTPUT "))
         .unwrap();

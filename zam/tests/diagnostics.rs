@@ -99,3 +99,81 @@ fn semantic_diagnostics_include_line_and_column() {
     }
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn json_diagnostics_are_one_line_and_structured() {
+    let path = std::env::temp_dir().join(format!("zam-json-{}.zm", std::process::id()));
+    let escaped = path.display().to_string().replace('\\', "\\\\");
+    fs::write(&path, "fn main() {\nprintln(@)\n}\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+        .args(["check", "--json"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(!output.status.success());
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    for field in [
+        "\"command\":\"check\"",
+        "\"ok\":false",
+        &format!("\"file\":\"{escaped}\""),
+        "\"line\":2",
+        "\"column\":9",
+        "\"function\":null",
+        "\"message\":\"unexpected character '@'\"",
+    ] {
+        assert!(stdout.contains(field), "{field} missing from {stdout}");
+    }
+    // 人类可读的那一行仍然在 stderr，stdout 保持是合法 JSON。
+    assert!(String::from_utf8_lossy(&output.stderr).contains(&path.display().to_string()));
+
+    fs::write(&path, "fn main() {\nprintln(1)\n}\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+        .args(["check", "--json"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "{\"command\":\"check\",\"ok\":true,\"diagnostics\":[]}"
+    );
+
+    // 不支持 --json 的命令必须报错，而不是静默忽略。
+    let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+        .args(["run", "--json"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--json is only supported"));
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn build_json_keeps_progress_off_stdout() {
+    let root = std::env::temp_dir().join(format!("zam-json-build-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("main.zm");
+    fs::write(&path, "fn main() {\nprintln(1)\n}\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+        .args(["build", "--json"])
+        .arg(&path)
+        .env("ZAMAK_CACHE_DIR", root.join("cache"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(
+        stdout.trim(),
+        "{\"command\":\"build\",\"ok\":true,\"diagnostics\":[]}"
+    );
+    // CACHE/OBJECT/LINK/OUTPUT 进度挪到了 stderr，stdout 才可能是合法 JSON。
+    assert!(String::from_utf8_lossy(&output.stderr).contains("CACHE MISS"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("OUTPUT "));
+    fs::remove_dir_all(root).unwrap();
+}
