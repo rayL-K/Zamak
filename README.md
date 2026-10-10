@@ -32,9 +32,9 @@ hello from zamak
 你好，Zamak
 ```
 
-`build` 输出 `OUTPUT <path>`，该路径是 `build/<name>-<hash>.exe`，可以直接启动，也可用 `zam run <path.exe>` 执行。产物不需要安装 Zamak 或 Rust；Windows 静态链接 C 运行库。命令失败返回非零退出码，错误写入 stderr。词法/语法错误包含源码文件、行号与列号；列号从 1 开始，按 Unicode 字符计数，制表符算一个字符，EOF 使用末尾位置。词法错误指向 token 起点，语法错误指向解析器发现错误的位置；尚未提供语义错误的精确位置。没有路径参数时使用当前目录；源码后缀统一为 `.zm`；可以直接检查或构建单个源码文件。
+`build` 输出 `OUTPUT <path>`，Windows 上是 `build/<name>-<hash>.exe`，Unix 上是同名的无后缀可执行文件，可以直接启动，也可用 `zam run <path>` 执行。产物不需要安装 Zamak 或 Rust；Windows 静态链接 C 运行库。命令失败返回非零退出码，错误写入 stderr。词法/语法错误包含源码文件、行号与列号；列号从 1 开始，按 Unicode 字符计数，制表符算一个字符，EOF 使用末尾位置。词法错误指向 token 起点，语法错误指向解析器发现错误的位置；尚未提供语义错误的精确位置。没有路径参数时使用当前目录；源码后缀统一为 `.zm`；可以直接检查或构建单个源码文件。
 
-Windows 构建需要 Visual Studio C++ 工具，自动通过 `vswhere` 查找 x64 MSVC。本机已安装。Unix 后端调用 `cc`，可通过 `CC` 指定编译器程序；Unix 路径尚未实机验证，暂统一使用 `.exe` 后缀。`check` 不需要 C 编译器。旧 `.zbc` 产物已不再支持，需要重新构建。
+Windows 构建需要 Visual Studio C++ 工具，自动通过 `vswhere` 查找 x64 MSVC。本机已安装。Unix 后端调用 `cc`，可通过 `CC` 指定编译器程序；已在 Ubuntu 26.04 + gcc 15.2 上实机验证构建、执行和全部集成回归。`check` 不需要 C 编译器。旧 `.zbc` 产物已不再支持，需要重新构建。
 
 ## 项目配置
 
