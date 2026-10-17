@@ -153,6 +153,17 @@ fn tools() -> Value {
             } },
             "annotations": read_only,
         },
+        {
+            "name": "hover",
+            "title": "Look up a type at a position",
+            "description": "Given a file, a line, and a column (both counted from 1), return what the name there is: the type of a local variable as the checker inferred it, or the signature of a function, method, field, or module function. Use it to find out what a value is before you call a method on it.",
+            "inputSchema": { "type": "object", "properties": {
+                "path": path_schema(),
+                "line": { "type": "integer", "description": "The line, counted from 1." },
+                "column": { "type": "integer", "description": "The column, counted from 1." },
+            }, "required": ["line", "column"] },
+            "annotations": read_only,
+        },
     ])
 }
 
@@ -282,6 +293,11 @@ fn call(name: &str, arguments: &Value) -> Value {
         }
         "explain" => explain(arguments["code"].as_str().unwrap_or_default()),
         "docs" => docs(arguments["topic"].as_str().unwrap_or_default()),
+        "hover" => hover(
+            path,
+            arguments["line"].as_u64(),
+            arguments["column"].as_u64(),
+        ),
         _ => text(format!("unknown tool {name}"), true),
     }
 }
@@ -445,6 +461,61 @@ fn docs(topic: &str) -> Value {
     text(sections.join("\n\n"), false)
 }
 
+/// `hover`：给出文件、行、列（都从 1 起），返回那里的名字是什么——检查器推断出的局部变量
+/// 类型，或函数、方法、字段、标准库函数的签名。与编辑器里的悬停用的是同一套查询。
+fn hover(path: &str, line: Option<u64>, column: Option<u64>) -> Value {
+    let (Some(line), Some(column)) = (line, column) else {
+        return text(
+            "hover needs line and column, both counted from 1".into(),
+            true,
+        );
+    };
+    // 单个文件直接读；给的是目录时找入口模块。
+    let file = if path.ends_with(".zm") {
+        std::path::PathBuf::from(path)
+    } else {
+        let root = std::path::Path::new(path);
+        let manifest = root.join("zam.toml");
+        let entry = std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find_map(|line| line.trim().strip_prefix("entry").map(str::to_owned))
+                    .and_then(|rest| {
+                        let rest = rest.trim().strip_prefix('=')?.trim();
+                        Some(rest.trim_matches('"').to_owned())
+                    })
+            })
+            .unwrap_or_else(|| "src/main.zm".to_owned());
+        root.join(entry)
+    };
+    let text_of = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) => {
+            return text(format!("cannot read {}: {error}", file.display()), true);
+        }
+    };
+    let (line, column) = (line as usize, column as usize);
+    if line == 0 || column == 0 {
+        return text("line and column start at 1".into(), true);
+    }
+    // 编辑器里的悬停优先给出检查器的结论。
+    if let Some((name, ty)) = crate::lsp::type_of(&text_of, line - 1, column - 1) {
+        return text(format!("{name}: {ty}"), false);
+    }
+    // 不是局部变量：按声明找函数、方法、字段或标准库函数。
+    match crate::lsp::describe_at(&text_of, line - 1, column - 1) {
+        Some(answer) => text(answer, false),
+        None => text(
+            format!(
+                "nothing declared at {}:{line}:{column}; put the column inside a name",
+                file.display()
+            ),
+            false,
+        ),
+    }
+}
+
 fn split_sections(text: &str) -> Vec<&str> {
     let mut starts: Vec<usize> = text
         .match_indices("\n## ")
@@ -554,6 +625,57 @@ mod tests {
         let reply = handle(&json!({ "jsonrpc": "2.0", "id": 7, "method": "nope" })).unwrap();
         assert_eq!(reply["error"]["code"], -32601);
         let tools = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" })).unwrap();
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 7);
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["check", "build", "run", "test", "format", "explain", "docs", "hover"]
+        );
+    }
+
+    /// `hover` 工具：给文件、行、列，返回那里的类型或签名。行、列都从 1 起。
+    #[test]
+    fn hover_reports_types_and_signatures() {
+        let root = std::env::temp_dir().join(format!("zam-mcp-hover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "\
+struct Circle:
+    radius: f64
+
+fn make() -> Circle:
+    Circle(radius: 1.0)
+
+fn main():
+    let thing = make()
+    println(thing.radius)
+";
+        let file = root.join("main.zm");
+        std::fs::write(&file, source).unwrap();
+        let path = file.to_str().unwrap();
+
+        let body = |answer: Value| answer["content"][0]["text"].as_str().unwrap().to_owned();
+        // 第 8 行 `    let thing = make()`：`thing` 的类型是检查器推断出的 `Circle`。
+        let local = hover(path, Some(8), Some(10));
+        assert_eq!(body(local.clone()), "thing: Circle", "{local}");
+        // 第 9 行 `    println(thing.radius)`：`thing` 在第 13–17 列，仍是 `Circle`。
+        assert_eq!(body(hover(path, Some(9), Some(14))), "thing: Circle");
+        // `make` 是函数，给出签名。
+        let function = body(hover(path, Some(8), Some(18)));
+        assert!(function.contains("fn make() -> Circle"), "{function}");
+        // 结构体声明处给出它的定义。
+        let declared = body(hover(path, Some(1), Some(9)));
+        assert!(declared.contains("struct Circle"), "{declared}");
+        // 少了行列、或者行列不对，都要说清楚。
+        assert_eq!(hover(path, None, Some(3))["isError"], true);
+        assert_eq!(hover(path, Some(0), Some(3))["isError"], true);
+        let missing = body(hover(path, Some(200), Some(3)));
+        assert!(missing.contains("nothing declared"), "{missing}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

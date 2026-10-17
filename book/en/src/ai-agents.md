@@ -75,6 +75,7 @@ Claude Code and Cursor pick up `.mcp.json` when you open the project. For anothe
 | `format` | Formats the project's files, like `zam fmt`. |
 | `explain` | Explains a diagnostic code, such as `ZM301`, and how to fix it. |
 | `docs` | Returns the language reference, the functions of a standard library module, or the parts of the reference about a word. |
+| `hover` | Given a file, line, and column (counted from 1), returns the type of the name there or its signature. |
 
 The tools run `zam` itself, so their results are exactly what you'd see on the command line.
 

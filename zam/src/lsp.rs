@@ -835,21 +835,54 @@ fn member_items(context: &Context, owner: &str) -> Vec<Value> {
     items
 }
 
-/// 用检查器推断变量的真实类型：解析并检查光标之前的代码，问 `compiler::local_type`。
-/// 只认那几种补全需要的分类（`string`、`list`、`map`、结构体名），和 `value_type` 对齐；
-/// 任何一步失败都返回 None，让调用方退回文字推断。
-fn checked_type(context: &Context, name: &str) -> Option<String> {
-    // 光标之后（以及光标那一行）不参与检查：`thing.` 去掉点是裸表达式，去掉名字又是空块，
-    // 都会在光标这行报错，而对补全没有用处——要的类型在前面的语句里已经定下来了。
+/// 编辑器（LSP）与 MCP 共用的类型查询：`line`、`column` 从 0 起（LSP 的列是 UTF-16，
+/// 这里按字符算，两者在 ASCII 代码里一致）。光标处的名字在所在函数里是局部变量时返回它的
+/// 源码写法类型（`Point`、`[string]`、`&mut Point`），否则返回 None。
+pub(crate) fn type_of(text: &str, line: usize, column: usize) -> Option<(String, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let current = lines.get(line).copied().unwrap_or("");
+    let context = Context {
+        uri: "",
+        path: PathBuf::new(),
+        text,
+        lines,
+        line,
+        column: char_index(current, column),
+    };
+    let (name, _, _) = identifier_at(&context)?;
+    let ty = inferred_type(&context, &name)?;
+    Some((name, ty))
+}
+
+/// 检查器推断出的类型（不做 `string`/`list`/结构体的粗分类）：`compiler::local_type` 的原样结果。
+fn inferred_type(context: &Context, name: &str) -> Option<String> {
+    // 把光标所在行也带上：`let thing = make()` 的绑定就在这一行，只取前面的行就看不到它。
+    // 光标右侧的 `thing.` 去掉之后，剩下的整行仍是合法语句，解析器和检查器都能接着用。
     let mut prefix = String::new();
     for line in context.lines.iter().take(context.line) {
         prefix.push_str(line);
         prefix.push('\n');
     }
-    let module = compiler::parse(&prefix).ok()?;
+    let current = context.lines.get(context.line).copied().unwrap_or("");
+    // 光标所在这一行可能还是半截（`thing.`、`let x =`）。整行能解析就带上——悬停与补全
+    // 都要靠它里面的绑定；解析不了就整行丢掉，前面的语句已经足够推断类型。
+    let full = format!("{prefix}{current}\n");
+    let usable = if compiler::parse(&full).is_ok() {
+        full
+    } else {
+        prefix.clone()
+    };
+    let module = compiler::parse(&usable).ok()?;
     // 检查器要知道入口函数，单文件入口是 `main`（与 `zam check` 一致）。
     compiler::check(&module, "main").ok()?;
-    let ty = compiler::local_type(&module, context.line + 1, name)?;
+    compiler::local_type(&module, context.line + 1, name)
+}
+
+/// 用检查器推断变量的真实类型：解析并检查光标之前的代码，问 `compiler::local_type`。
+/// 只认那几种补全需要的分类（`string`、`list`、`map`、结构体名），和 `value_type` 对齐；
+/// 任何一步失败都返回 None，让调用方退回文字推断。
+fn checked_type(context: &Context, name: &str) -> Option<String> {
+    let ty = inferred_type(context, name)?;
     // `&mut [string]`、`&Point` 这类借用按被借用的类型分类。
     let ty = ty
         .trim()
@@ -960,47 +993,67 @@ fn markdown(code: &str) -> Value {
 }
 
 fn hover(context: &Context) -> Value {
-    let Some((owner, name)) = context.word() else {
-        return Value::Null;
+    match describe_at_context(context) {
+        Some(answer) => markdown(&answer),
+        None => Value::Null,
+    }
+}
+
+/// MCP 的 `hover` 工具用：`line`、`column` 从 0 起，返回那里的声明说明（不带 markdown 包装）。
+pub(crate) fn describe_at(text: &str, line: usize, column: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let current = lines.get(line).copied().unwrap_or("");
+    let context = Context {
+        uri: "",
+        path: PathBuf::new(),
+        text,
+        lines,
+        line,
+        column: char_index(current, column),
     };
+    describe_at_context(&context)
+}
+
+/// 光标处名字的说明：结构体字段/方法、函数、标准库函数、全局函数或模块名。
+fn describe_at_context(context: &Context) -> Option<String> {
+    let (owner, name) = context.word()?;
     if let Some(owner) = owner {
         if let Some(path) = imports(context.text).get(&owner) {
             if let Some(module) = path.strip_prefix("std/") {
                 if let Some((_, signature)) =
                     std_functions(module).into_iter().find(|(n, _)| *n == name)
                 {
-                    return markdown(&signature);
+                    return Some(signature);
                 }
             } else if let Some((_, text)) = module_source(context, path) {
                 if let Some(declaration) = declarations(&text).into_iter().find(|d| d.name == name)
                 {
-                    return markdown(&describe(&declaration));
+                    return Some(describe(&declaration));
                 }
             }
-            return Value::Null;
+            return None;
         }
         for declaration in declarations(context.text) {
             if declaration.name == owner {
                 if let Some((_, detail)) = declaration.members.iter().find(|(n, _)| *n == name) {
-                    return markdown(detail);
+                    return Some(detail.clone());
                 }
             }
         }
-        return Value::Null;
+        return None;
     }
     if let Some(declaration) = declarations(context.text)
         .into_iter()
         .find(|d| d.name == name)
     {
-        return markdown(&describe(&declaration));
+        return Some(describe(&declaration));
     }
     if let Some((_, detail)) = GLOBALS.iter().find(|(n, _)| *n == name) {
-        return markdown(detail);
+        return Some((*detail).to_owned());
     }
-    if let Some(path) = imports(context.text).get(&name) {
-        return markdown(&format!("use {path}"));
-    }
-    Value::Null
+    imports(context.text)
+        .get(&name)
+        .map(|path| format!("use {path}"))
 }
 
 fn describe(declaration: &Declaration) -> String {

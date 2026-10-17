@@ -101,7 +101,7 @@ fn mcp_server_exposes_the_zamak_tools() {
         .collect();
     assert_eq!(
         names,
-        ["check", "build", "run", "test", "format", "explain", "docs"]
+        ["check", "build", "run", "test", "format", "explain", "docs", "hover"]
     );
 
     // check：与 `zam check --json` 相同的诊断。
@@ -142,6 +142,18 @@ fn mcp_server_exposes_the_zamak_tools() {
     assert!(meaning.starts_with("ZM301 (ownership)"), "{meaning}");
     let (functions, _) = client.tool("docs", json!({ "topic": "string" }));
     assert!(functions.contains("string.split("), "{functions}");
+
+    // hover：按行、列（从 1 起）给出那里的类型或签名。
+    let (label, error) = client.tool(
+        "hover",
+        json!({ "path": "bad.zm", "line": 2, "column": 10 }),
+    );
+    assert!(!error, "{label}");
+    assert_eq!(label, "s: string", "{label}");
+    let (signature, error) =
+        client.tool("hover", json!({ "path": "bad.zm", "line": 4, "column": 6 }));
+    assert!(!error, "{signature}");
+    assert!(signature.contains("fn println"), "{signature}");
 
     drop(client);
     assert!(child.wait().unwrap().success());
