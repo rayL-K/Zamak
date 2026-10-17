@@ -95,6 +95,7 @@ impl Server {
                     "completionProvider": { "triggerCharacters": ["."] },
                     "hoverProvider": true,
                     "definitionProvider": true,
+                    "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
                     "documentFormattingProvider": true,
                 },
                 "serverInfo": { "name": "zam", "version": env!("CARGO_PKG_VERSION") },
@@ -133,6 +134,7 @@ impl Server {
             "textDocument/completion" => Some(self.request(params, completion)),
             "textDocument/hover" => Some(self.request(params, hover)),
             "textDocument/definition" => Some(self.request(params, definition)),
+            "textDocument/signatureHelp" => Some(self.request(params, signature_help)),
             "textDocument/formatting" => Some(self.formatting(params)),
             _ if id.is_some() => {
                 send(
@@ -959,6 +961,211 @@ fn describe(declaration: &Declaration) -> String {
         text.push_str(&format!("\n    {member}"));
     }
     text
+}
+
+/// 光标处的调用：从光标往前找到还没闭合的 `(`，取出被调用的名字与前面已经写了几个参数。
+/// 返回（被调用的名字, 当前是第几个参数）。
+fn open_call(context: &Context) -> Option<(String, usize)> {
+    // 只看光标之前的文本；跨行调用也要能找到，所以把前面的行拼起来。
+    let mut before = String::new();
+    for (index, line) in context.lines.iter().enumerate() {
+        if index < context.line {
+            before.push_str(line);
+            before.push('\n');
+        } else {
+            before.extend(line.chars().take(context.column));
+            break;
+        }
+    }
+    let chars: Vec<char> = before.chars().collect();
+    // 从后往前找未配对的 `(`；顺便数这一层里已经出现了几个逗号。
+    let mut depth = 0i32;
+    let mut commas = 0usize;
+    for position in (0..chars.len()).rev() {
+        match chars[position] {
+            ')' | ']' | '}' => depth += 1,
+            // 遇到没配对的闭括号就说明光标不在这次调用里。
+            '(' | '[' | '{' if depth > 0 => depth -= 1,
+            '(' => {
+                // 找到调用，往左取名字（可以带 `模块.` 前缀）。
+                let mut start = position;
+                while start > 0
+                    && (chars[start - 1].is_alphanumeric()
+                        || chars[start - 1] == '_'
+                        || chars[start - 1] == '.')
+                {
+                    start -= 1;
+                }
+                let name: String = chars[start..position].iter().collect();
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+                {
+                    return None;
+                }
+                // 括号里的逗号就是已经写好的参数个数（跳过嵌套的括号）。
+                let mut inner = 0i32;
+                for c in &chars[position + 1..] {
+                    match c {
+                        '(' | '[' | '{' => inner += 1,
+                        ')' | ']' | '}' => inner -= 1,
+                        ',' if inner == 0 => commas += 1,
+                        _ => {}
+                    }
+                }
+                return Some((name, commas));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 把签名拆成（前缀, 每个参数, 返回类型）：`fn f(a: i64, b: &string) -> bool` →
+/// （`fn f(`, [`a: i64`, `b: &string`], `) -> bool`）。
+fn signature_parts(signature: &str) -> Option<(String, Vec<String>, String)> {
+    let open = signature.find('(')?;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (offset, c) in signature[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let inner = &signature[open + 1..close];
+    // 参数按顶层逗号切开（`{K: V}`、`fn(...)`、元组里的逗号不算）。
+    let mut params = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, c) in inner.char_indices() {
+        match c {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' | ']' | '}' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                params.push(inner[start..index].trim().to_owned());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = inner[start..].trim();
+    if !tail.is_empty() {
+        params.push(tail.to_owned());
+    }
+    Some((
+        signature[..=open].to_owned(),
+        params,
+        signature[close..].to_owned(),
+    ))
+}
+
+/// 本地或标准库函数的签名：`模块.名` 优先查标准库，否则查本文档与 `use` 进来的模块。
+fn declared_signature(context: &Context, name: &str) -> Option<String> {
+    let (owner, short) = match name.split_once('.') {
+        Some((owner, short)) => (Some(owner), short),
+        None => (None, name),
+    };
+    if let Some(owner) = owner {
+        // 结构体方法：`p.norm()` 里的 `norm` 属于接收者类型，名字里没有类型信息，按方法名找。
+        for declaration in declarations(context.text) {
+            if declaration.name == owner {
+                if let Some((_, member)) = declaration.members.iter().find(|(n, _)| n == short) {
+                    return Some(member.clone());
+                }
+            }
+        }
+        if let Some(path) = imports(context.text).get(owner) {
+            if let Some(module) = path.strip_prefix("std/") {
+                return std_functions(module)
+                    .into_iter()
+                    .find(|(n, _)| n == short)
+                    .map(|(_, signature)| signature);
+            }
+            if let Some((_, text)) = module_source(context, path) {
+                return declarations(&text)
+                    .into_iter()
+                    .find(|d| d.name == short)
+                    .map(|d| d.signature);
+            }
+        }
+        // 方法调用的接收者不是模块名：按方法名在本文档的类型里找。
+        for declaration in declarations(context.text) {
+            if let Some((_, member)) = declaration.members.iter().find(|(n, _)| n == short) {
+                if declaration.kind != "fn" {
+                    return Some(member.clone());
+                }
+            }
+        }
+        return None;
+    }
+    if let Some(declaration) = declarations(context.text)
+        .into_iter()
+        .find(|d| d.name == short && d.kind == "fn")
+    {
+        return Some(declaration.signature);
+    }
+    if let Some((_, signature)) = GLOBALS.iter().find(|(n, _)| *n == short) {
+        return Some((*signature).to_owned());
+    }
+    // 打开的标准库模块里找（`use std/io` 之后 `io.read_line(...)` 走上面的分支，
+    // 这里是没写前缀时直接叫名字的情况）。
+    for path in imports(context.text).values() {
+        if let Some(module) = path.strip_prefix("std/") {
+            if let Some((_, signature)) =
+                std_functions(module).into_iter().find(|(n, _)| n == short)
+            {
+                return Some(signature);
+            }
+        }
+    }
+    None
+}
+
+/// `textDocument/signatureHelp`：输入 `foo(` 时显示参数列表，并标出当前是第几个参数。
+fn signature_help(context: &Context) -> Value {
+    let Some((name, active)) = open_call(context) else {
+        return Value::Null;
+    };
+    let Some(declaration) = declared_signature(context, &name) else {
+        return Value::Null;
+    };
+    let Some((prefix, params, tail)) = signature_parts(&declaration) else {
+        return Value::Null;
+    };
+    // 签名里的 `; 说明` 之类的补充不算参数，只保留 `fn ...(...) -> T` 这一段。
+    let label = format!("{prefix}{}{tail}", params.join(", "));
+    let mut parameters = Vec::new();
+    let mut offset = prefix.chars().count();
+    for parameter in &params {
+        let length = parameter.chars().count();
+        parameters.push(json!({
+            "label": [offset, offset + length],
+            "documentation": json!({ "kind": "markdown", "value": parameter }),
+        }));
+        offset += length + ", ".len();
+    }
+    // 当前参数：写多了就停在最后一个，参数列表为空时给 None。
+    let active_parameter = (!params.is_empty()).then(|| active.min(params.len() - 1));
+    json!({
+        "signatures": [{
+            "label": label,
+            "documentation": json!({ "kind": "markdown", "value": format!("```zamak\n{declaration}\n```") }),
+            "parameters": parameters,
+        }],
+        "activeSignature": 0,
+        "activeParameter": active_parameter,
+    })
 }
 
 fn location(uri: &str, line: usize, text: &str, name: &str) -> Value {
