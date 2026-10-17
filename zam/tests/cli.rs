@@ -1,5 +1,66 @@
 use std::{fs, process::Command};
 
+/// `zam --help` 跟随 `ZAMAK_LANG`：两种语言都列出同样的子命令，并且每条都有一句说明
+/// （以前只有一行行命令名，看不出每个命令是做什么的）。
+#[test]
+fn help_lists_every_command_with_a_description_in_both_languages() {
+    let help = |lang: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+            .arg("--help")
+            .env("ZAMAK_LANG", lang)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{lang}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let english = help("en");
+    let chinese = help("zh");
+    assert!(english.starts_with("zam "), "{english}");
+    assert!(chinese.starts_with("zam "), "{chinese}");
+    for command in [
+        "check",
+        "build",
+        "run",
+        "test",
+        "fmt",
+        "new",
+        "add",
+        "remove",
+        "update",
+        "search",
+        "publish",
+        "lsp",
+        "mcp",
+        "upgrade",
+        "demo",
+        "--version",
+    ] {
+        // 每个命令一行，并且同一行上有说明（说明与命令之间至少两个空格隔开）。
+        for (lang, text) in [("en", &english), ("zh", &chinese)] {
+            let line = text
+                .lines()
+                .find(|line| line.trim_start().starts_with(&format!("zam {command}")))
+                .unwrap_or_else(|| panic!("{lang}: missing {command} in\n{text}"));
+            let rest = line
+                .trim_start()
+                .strip_prefix(&format!("zam {command}"))
+                .unwrap();
+            let description = rest.split("  ").map(str::trim).find(|s| !s.is_empty());
+            assert!(
+                description.is_some_and(|d| d.len() > 4),
+                "{lang}: `zam {command}` has no description: {line:?}"
+            );
+        }
+    }
+    // 语言确实换了：英文里不该出现“只做类型与所有权检查”，中文里不该出现英文说明。
+    assert!(english.contains("type-check without building"), "{english}");
+    assert!(chinese.contains("只做类型与所有权检查"), "{chinese}");
+    assert!(
+        !chinese.contains("type-check without building"),
+        "{chinese}"
+    );
+}
+
 #[test]
 fn invalid_arguments_fail_before_loading_or_writing_projects() {
     for args in [

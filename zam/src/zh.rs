@@ -79,6 +79,101 @@ pub fn text(en: &str) -> String {
     translate(en)
 }
 
+/// `zam --help`：每个子命令一行说明，跟随 `ZAMAK_LANG`。末尾的换行由调用方负责。
+pub fn help(version: &str) -> String {
+    // （命令与参数, 英文说明, 中文说明）
+    const COMMANDS: &[(&str, &str, &str)] = &[
+        (
+            "check [project|file]",
+            "type-check without building",
+            "只做类型与所有权检查，不构建",
+        ),
+        (
+            "build [project|file]",
+            "compile into a native executable",
+            "编译成原生可执行文件",
+        ),
+        (
+            "run [project|file] [-- args...]",
+            "build and run; arguments after -- go to the program",
+            "构建并运行；-- 之后的参数交给程序",
+        ),
+        (
+            "test [project|file] [filter]",
+            "run the test_ functions",
+            "运行所有 test_ 开头的测试函数",
+        ),
+        (
+            "fmt [project|file]",
+            "reindent the sources in place",
+            "就地整理缩进",
+        ),
+        (
+            "new <directory> [--template ai]",
+            "create a project skeleton",
+            "新建项目骨架",
+        ),
+        (
+            "add <name> [version|git-url|directory] [rev]",
+            "add a dependency to zam.toml",
+            "给 zam.toml 添加依赖",
+        ),
+        ("remove <name>", "remove a dependency", "删除一个依赖"),
+        (
+            "update [project]",
+            "re-resolve the git dependencies",
+            "重新解析 git 依赖",
+        ),
+        (
+            "search [word]",
+            "search the package index",
+            "在包索引里搜索",
+        ),
+        (
+            "publish [project]",
+            "publish a version to the package index",
+            "把当前版本发布到包索引",
+        ),
+        (
+            "lsp",
+            "run the language server on stdio",
+            "在 stdio 上启动语言服务器",
+        ),
+        (
+            "mcp",
+            "run the MCP server for AI coding agents",
+            "启动给 AI 编程助手用的 MCP 服务器",
+        ),
+        (
+            "upgrade",
+            "update an npm-installed zam",
+            "更新用 npm 安装的 zam",
+        ),
+        (
+            "demo",
+            "write and run a small sample project",
+            "生成并运行一个示例项目",
+        ),
+        ("--version", "print the version", "显示版本号"),
+    ];
+    let chinese = enabled();
+    let mut out = format!("zam {version}\n");
+    for (usage, en, zh) in COMMANDS {
+        let line = if chinese { zh } else { en };
+        out.push_str(&format!("  zam {usage:<48}{line}\n"));
+    }
+    if chinese {
+        out.push_str(
+            "\n环境变量：ZAMAK_LANG=zh|en 切换界面语言，ZAMAK_JOBS 控制并行编译数，ZAMAK_CACHE_DIR 指定缓存目录。\n",
+        );
+    } else {
+        out.push_str(
+            "\nEnvironment: ZAMAK_LANG=zh|en picks the language, ZAMAK_JOBS controls parallel compiles, ZAMAK_CACHE_DIR sets the cache directory.\n",
+        );
+    }
+    out
+}
+
 fn translate(en: &str) -> String {
     if let Some(zh) = whole(en) {
         return zh;

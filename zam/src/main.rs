@@ -163,7 +163,7 @@ fn execute() -> project::Result<()> {
         // 走到这里说明是安装脚本或源码装的。
         Some("upgrade") => println!("zam {}: to get updates with one command, install Zamak with npm:\n  npm install -g zamak\nthen run `zam upgrade`. If you installed it with the install script, run the script again.", env!("CARGO_PKG_VERSION")),
         Some("--version") | Some("-V") => println!("{}", env!("CARGO_PKG_VERSION")),
-        None | Some("--help") | Some("-h") => println!("zam {}\n  zam check [project|file]\n  zam build [project|file]\n  zam fmt [project|file]\n  zam run [project|file|artifact] [-- args...]\n  zam test [project|file] [filter]\n  zam add <name> [version|git-url|directory] [rev]\n  zam remove <name>\n  zam update [project]\n  zam search [word]\n  zam publish [project]\n  zam new <directory> [--template ai]\n  zam check --json [project|file]\n  zam build --json [project|file]\n  zam lsp\n  zam mcp\n  zam upgrade\n  zam demo\n  zam --version", env!("CARGO_PKG_VERSION")),
+        None | Some("--help") | Some("-h") => print!("{}", zh::help(env!("CARGO_PKG_VERSION"))),
         _ => return Err("usage: zam <check|build|run|test|fmt|new|add|remove|update|search|publish> [project|file]".into()),
     }
     Ok(())
