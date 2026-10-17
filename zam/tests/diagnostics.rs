@@ -296,6 +296,11 @@ const REAL_SOURCE_CODES: &[(&str, &str, &str)] = &[
         "ownership",
     ),
     (
+        "fn main():\n    let a: [string; 3] = [\"a\", \"b\", \"c\"]\n",
+        "ZM200",
+        "type",
+    ),
+    (
         "fn f(a: &string, b: string) -> i64:\n    return 1\nfn main():\n    let s = \"x\"\n    f(&s, s)\n",
         "ZM421",
         "ownership",

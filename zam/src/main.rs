@@ -639,6 +639,18 @@ fn classify(message: &str) -> (&'static str, &'static str, Option<&'static str>)
             "bounds",
             Some("ensure the index is within the declared array length"),
         )
+    } else if message.contains("arrays are only supported as local values")
+        || message.contains("only [i64; N] arrays are supported")
+        || message.contains("array length must be")
+        || message.contains("invalid array length")
+    {
+        (
+            "ZM200",
+            "type",
+            Some(
+                "fixed arrays are written [T; N] with a length from 1 to 1024 and declared as local values, and [T] is a growable list",
+            ),
+        )
     } else if message.starts_with("test function ") || message.contains(": test function ") {
         (
             "ZM200",

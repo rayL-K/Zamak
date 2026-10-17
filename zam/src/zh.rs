@@ -83,8 +83,15 @@ fn translate(en: &str) -> String {
     if let Some(zh) = whole(en) {
         return zh;
     }
-    // 句子里带着补充说明（“…; 改法”）：分开翻译。
     if en.contains("; ") {
+        // 句子里带着补充说明（“…; 改法”）：分开翻译。但 `[T; N]` 这类类型写法里的分号不是
+        // 句子分隔符，照抄会让中文里冒出 `[T；N]`；写成方括号里且有 `;` 时整句不拆。
+        if en.split_once('[').is_some_and(|(_, rest)| {
+            rest.split_once(']')
+                .is_some_and(|(inner, _)| inner.contains(';'))
+        }) {
+            return en.to_string();
+        }
         return en.split("; ").map(translate).collect::<Vec<_>>().join("；");
     }
     // 位置或模块前缀（“src/main.zm: …”“geo: …”）：保留前缀，翻译后半句。
@@ -184,6 +191,11 @@ static TABLE: &[(&str, &str)] = &[
     ("unmatched } in string literal", "字符串里的 } 没有配对的 {"),
     ("nested { in string interpolation", "字符串插值里不能再嵌套 {"),
     ("empty {} in string literal", "字符串里有空的 {}"),
+    ("empty {} in string literal; write {} for literal braces", "字符串里有空的 {}；要输出大括号本身，请写 {}"),
+    ("byte_len returns i64", "byte_len 返回 i64"),
+    ("char_len returns i64", "char_len 返回 i64"),
+    ("equal returns bool", "equal 返回 bool"),
+    ("array index out of bounds", "数组下标越界"),
     ("write {{}} for literal braces", "要输出大括号本身，写 {{}}"),
     ("unsupported interpolation {%}: expected one expression", "不支持的插值 {{0}}：花括号里只能有一个表达式"),
     ("in interpolation {%}: %", "插值 {{0}} 中：{1}"),
@@ -612,6 +624,13 @@ static TABLE: &[(&str, &str)] = &[
     ("% requires % borrowed string argument(s)", "{0} 需要 {1} 个借用的字符串参数"),
     ("%: already exists", "{0}：已经存在"),
     ("project name must be an identifier", "项目名必须是合法的标识符"),
+    ("project name must be UTF-8", "项目名必须是 UTF-8"),
+    ("cannot start zam: %", "无法启动 zam：{0}"),
+    ("worker panicked", "构建线程意外退出"),
+    ("output has no parent directory", "输出路径没有上级目录"),
+    ("path-independent caching failed", "与路径无关的缓存失败"),
+    ("native cache entry was not produced", "没有生成原生缓存条目"),
+    ("missing native cache checksum: %", "原生缓存缺少校验和：{0}"),
 
     // ---- zam.toml、依赖与包索引 ----
     ("%: invalid zam.toml: %", "{0}：zam.toml 写法不对：{1}"),
@@ -642,6 +661,10 @@ static TABLE: &[(&str, &str)] = &[
     ("dependency % points to a package named %", "依赖 {0} 指向的包名叫 {1}"),
     ("use the same name", "两边用同一个名字"),
     ("dependency %: %", "依赖 {0}：{1}"),
+    ("a version without version", "某个版本条目缺少 version"),
+    ("add the public repository as the origin remote before publishing", "发布前先把公开仓库添加为 origin"),
+    ("publish a package from a git repository; run git init and commit it first", "包要发布自 git 仓库：先执行 git init 并提交"),
+    ("add version = \"%\" under [project] in zam.toml before publishing", "发布前在 zam.toml 的 [project] 下加上 version = \"{0}\""),
     ("dependency versions did not settle", "依赖版本无法确定下来"),
     ("pin the packages that keep changing with \"=1.2.3\"", "用 \"=1.2.3\" 把一直在变的包固定下来"),
     ("dependency %: directory % not found (a path dependency inside a git package must stay inside that repository)", "依赖 {0}：找不到目录 {1}（git 包里的路径依赖必须在同一个仓库里）"),
@@ -695,6 +718,19 @@ static TABLE: &[(&str, &str)] = &[
     ("install MSVC C++ build tools for native builds", "构建原生程序需要安装 MSVC C++ 生成工具"),
     ("C compiler unavailable: %", "找不到 C 编译器：{0}"),
     ("MSVC % not found", "找不到 MSVC 的 {0}"),
+    ("C compiler version query failed", "查询 C 编译器版本失败"),
+    ("MSVC discovery failed: %", "查找 MSVC 失败：{0}"),
+    ("MSVC setup failed: %", "MSVC 环境准备失败：{0}"),
+    ("MSVC setup failed:\n%", "MSVC 环境准备失败：\n{0}"),
+    ("MSVC setup produced no INCLUDE", "MSVC 环境准备后没有 INCLUDE 路径"),
+    ("MSVC setup unavailable: %", "MSVC 环境不可用：{0}"),
+    ("MSVC version query failed: %", "查询 MSVC 版本失败：{0}"),
+    ("MSVC version query failed:\n%", "查询 MSVC 版本失败：\n{0}"),
+    ("MSVC default version unavailable: %", "无法确定 MSVC 的默认版本：{0}"),
+    ("invalid MSVC default version", "MSVC 的默认版本不合法"),
+    ("missing ProgramFiles(x86)", "缺少环境变量 ProgramFiles(x86)"),
+    ("unsupported MSVC setup path", "MSVC 的环境准备路径不受支持"),
+    ("unsupported native cache path", "原生缓存路径不受支持"),
 
     // ---- main.rs 里补充的 Python 习惯提示 ----
     ("read a line with io.read_line()? and use std/io", "用 io.read_line()? 读一行，并导入 std/io"),
@@ -722,6 +758,9 @@ static TABLE: &[(&str, &str)] = &[
     ("use a literal that fits in `i64` (max 9223372036854775807)", "使用 `i64` 范围内的字面量（最大 9223372036854775807）"),
     ("check the input range before arithmetic or division", "运算或除法之前先检查输入的范围"),
     ("ensure the index is within the declared array length", "确保下标不超过数组声明的长度"),
+    ("fixed arrays are written [T; N] with a length from 1 to 1024 and declared as local values", "定长数组写成 [T; N]，长度 1–1024，并且只能声明为局部值"),
+    ("fixed arrays are written [T; N] with a length from 1 to 1024 and declared as local values, and [T] is a growable list", "定长数组写成 [T; N]、长度 1–1024 且只能声明为局部值；需要可增长的列表请用 [T]"),
+    ("use [T] for a growable list", "需要可增长的列表请用 [T]"),
     ("declare tests as fn test_name(): or fn test_name() -> !string: with no parameters", "测试写成 fn test_name(): 或 fn test_name() -> !string:，不带参数"),
     ("match the function type: the same parameter count and types, and no !E", "与函数类型保持一致：参数个数和类型相同，并且没有 !E"),
     ("rename the parameter", "给参数改个名字"),
@@ -806,6 +845,17 @@ mod tests {
             translate("geo: unknown function area"),
             "geo：未知的函数 area"
         );
+        // 类型写法里方括号中的分号不是句子分隔符，不能变成全角分号。
+        assert_eq!(
+            translate(
+                "fixed arrays are written [T; N] with a length from 1 to 1024 and declared as local values, and [T] is a growable list"
+            ),
+            "定长数组写成 [T; N]、长度 1–1024 且只能声明为局部值；需要可增长的列表请用 [T]"
+        );
+        assert_eq!(
+            translate("only [i64; N] arrays are supported"),
+            "只支持 [i64; N] 数组"
+        );
     }
 
     #[test]
@@ -835,4 +885,230 @@ mod tests {
             );
         }
     }
+
+    /// 只在本地跑的覆盖率体检：把编译器里所有报错句子抽出来，逐句过一遍 `translate`，
+    /// 列出还没翻译的。句式表靠手工维护，漏掉一条中文用户就会看到英文句子。
+    ///
+    /// 抽法：编译器与项目层的报错都是 `format!` 出来的英文句子，参数是名字/类型/数量，
+    /// 句式表里用 `%` 占位。这里把 `{名字}`、`{:?}` 之类的插值换成 `x`，再按句子比较；
+    /// 表里已有的句式用 `%` 通配匹配，所以只要句子骨架在表里就算覆盖。
+    ///
+    /// 内部断言用的句子（`unreachable`、`expected T`、`debug_assert` 之类）不算用户可见的
+    /// 报错，列在 `INTERNAL` 里跳过；确实只在内部用的句子也在这里说明理由。
+    #[test]
+    fn every_error_sentence_is_translated() {
+        let mut missing = Vec::new();
+        for source in [
+            include_str!("compiler.rs"),
+            include_str!("project.rs"),
+            include_str!("package.rs"),
+            include_str!("registry.rs"),
+            include_str!("native.rs"),
+            include_str!("main.rs"),
+        ] {
+            for sentence in error_sentences(source) {
+                if INTERNAL.iter().any(|(text, _)| *text == sentence) {
+                    continue;
+                }
+                if !is_translated(&sentence) {
+                    missing.push(sentence);
+                }
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "{} 条报错句子还没有中文（见 zh.rs 的 TABLE）：\n{}",
+            missing.len(),
+            missing.join("\n")
+        );
+    }
+
+    /// 一句英文报错的骨架是否已由 TABLE 覆盖（不要求整句对得上，按句子里每段分别看）。
+    fn is_translated(sentence: &str) -> bool {
+        // 先整句匹配；`[i64; N]` 这类类型名里的分号不是句子分隔符，整句对不上时才拆。
+        whole(sentence).is_some()
+            || sentence.split("; ").all(|part| {
+                whole(part).is_some()
+                    // `translate` 还会剥掉 `模块: ` 前缀后翻译后半句。
+                    || part.split_once(": ").is_some_and(|(head, tail)| {
+                        !head.contains(' ') && whole(tail).is_some()
+                    })
+                    // 只有名字/类型/数字的片段（`x`、`%d`、`i64`）没什么可翻的。
+                    || part.split_whitespace().count() <= 1
+            })
+    }
+
+    /// 从 Rust 源码里抽出用户能看到的报错句子：只取返回错误的位置（`Err(...)`、`ok_or*`、
+    /// `map_err`、`fail`）上的字符串字面量。C 运行时字符串、帮助文字、进度输出、测试代码都
+    /// 不在范围里。
+    fn error_sentences(source: &str) -> Vec<String> {
+        const SITES: &[&str] = &["Err(", "ok_or", "map_err", "fail ", "push(format!"];
+        let mut found = Vec::new();
+        let mut in_tests = false;
+        let lines: Vec<&str> = source.lines().collect();
+        let mut index = 0;
+        while index < lines.len() {
+            let line = lines[index];
+            let trimmed = line.trim_start();
+            // `#[cfg(test)] mod tests` 之后的都是测试代码，里面的字符串不是用户能看到的。
+            if trimmed.starts_with("mod tests") || trimmed.contains("mod tests {") {
+                in_tests = true;
+            }
+            index += 1;
+            if in_tests || trimmed.starts_with("//") {
+                continue;
+            }
+            // `format!(` 跨行时，把后面独占一行的字面量拼回同一句。
+            let mut text = line.to_owned();
+            let site = SITES.iter().any(|site| line.contains(site));
+            if site {
+                let mut next = index;
+                while next < lines.len() {
+                    let candidate = lines[next].trim();
+                    let literal = candidate.strip_suffix(')').unwrap_or(candidate);
+                    if let Some(inner) = literal
+                        .strip_prefix('"')
+                        .and_then(|rest| rest.strip_suffix('"'))
+                    {
+                        text.push_str(inner);
+                        index = next + 1;
+                        next += 1;
+                        if candidate.ends_with(')') {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                continue;
+            }
+            for literal in string_literals(&text) {
+                let skeleton = placeholders(&literal);
+                if !looks_like_error_sentence(&skeleton) {
+                    continue;
+                }
+                found.push(skeleton);
+            }
+        }
+        found
+    }
+
+    /// 像一句给用户看的英文报错：以字母开头、至少两个词，并且不是 C 代码片段或注释行。
+    fn looks_like_error_sentence(skeleton: &str) -> bool {
+        let words: Vec<&str> = skeleton.split_whitespace().collect();
+        if words.len() < 2 {
+            return false;
+        }
+        if !words[0]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+        {
+            return false;
+        }
+        // C 片段（`x *cx;`、`x cx;`）、声明片段（`byte_len returns i64` 这类没有空格的类型名
+        // 其实是真实报错，保留）与行首注释都不算。
+        const NOT_A_SENTENCE: &[&str] = &[
+            "x *cx;",
+            "x cx;",
+            "x: x",
+            "line x, column x: x: x",
+            "or true",
+            "match arm",
+            "nested x",
+            "unterminated x",
+            "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace",
+        ];
+        !NOT_A_SENTENCE.contains(&skeleton)
+    }
+
+    /// 一行里的所有 `"..."` 字面量（`\n` 换成空格，`\"` 还原成引号）。
+    fn string_literals(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = line;
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            // 找结尾的引号，跳过被转义的 `\"`。
+            let mut end = None;
+            let mut escaped = false;
+            for (index, c) in after.char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match c {
+                    '\\' => escaped = true,
+                    '"' => {
+                        end = Some(index);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else { break };
+            out.push(after[..end].replace("\\n", " ").replace("\\\"", "\""));
+            rest = &after[end + 1..];
+        }
+        out
+    }
+
+    /// `line {line}, column {column}: foo {a:?}` → `line x, column x: foo x`。
+    /// 源码里写的是转义后的 `{{}}`，展开成 `{}` 后保留不动——它是报错里原样显示的花括号
+    /// （例如 “empty {} in string literal”），不是插值。
+    fn placeholders(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '{' {
+                if chars.peek() == Some(&'{') {
+                    // 源码里的 `{{` 是转义，显示出来就是一个 `{`；紧跟的 `}}` 同理。
+                    chars.next();
+                    if chars.peek() == Some(&'}') {
+                        chars.next();
+                    }
+                    out.push('{');
+                    continue;
+                }
+                let mut inner = String::new();
+                let mut closed = false;
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '}' {
+                        closed = true;
+                        break;
+                    }
+                    inner.push(next);
+                }
+                // `{名字}`、`{:?}` 是 Rust 插值，换成 `x`；`{}` 是报错里原样显示的花括号
+                // （“empty {} in string literal”），保留成 `{}`。
+                if closed && !inner.is_empty() {
+                    out.push('x');
+                } else if closed {
+                    out.push_str("{}");
+                } else {
+                    out.push('{');
+                    out.push_str(&inner);
+                }
+            } else if c == '}' && chars.peek() == Some(&'}') {
+                chars.next();
+                out.push('}');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// 内部断言或调试用、不会显示给用户的句子。
+    static INTERNAL: &[(&str, &str)] = &[
+        ("not reached", "match 分支的内部兜底"),
+        ("expected an array or list", "生成器的内部断言"),
+        (
+            "invalid base",
+            "折叠常量时的内部断言（用户看到的是带部分的版本）",
+        ),
+    ];
 }
