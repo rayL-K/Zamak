@@ -120,7 +120,7 @@ fn main():
 
 ```text
 before
-zam: integer arithmetic error
+zam: 整数运算出错
 ```
 
 在 C 里，有符号整数溢出是未定义行为；Rust 的发布构建会回绕成一个负数。无论哪种，程序都会带着错误的值继续运行。Zamak 检查每一次整数 `+`、`-`、`*`、`//`、`%` 和 `**`。除以零同样会让程序停下，整数和浮点数都一样：
@@ -133,7 +133,7 @@ fn main():
 ```
 
 ```text
-zam: division by zero
+zam: 除以零
 ```
 
 这些检查的开销很小。编译器能证明其中大部分不可能出错（例如循环计数器不会超过列表长度），并把它们去掉。实测数据见[附录 B](appendix-performance.md)。

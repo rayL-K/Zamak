@@ -34,7 +34,7 @@ fn main():
 ```
 
 ```text
-zam: list index out of bounds
+zam: 列表下标越界
 ```
 
 ### 修改列表

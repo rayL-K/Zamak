@@ -2,6 +2,60 @@ mod common;
 
 use std::{fs, process::Command};
 
+/// 生成程序的运行时报错也要跟 ZAMAK_LANG：`zam: list index out of bounds` 与中文版一一对应。
+/// C 运行时只读一次环境变量，所以这里按语言各起一次进程。
+#[test]
+fn runtime_panics_follow_the_language() {
+    let root = std::env::temp_dir().join(format!("zam-panic-lang-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let cache = root.join("cache");
+    for (name, source, en, zh) in [
+        (
+            "index",
+            "fn main():\n    let xs: [i64] = [1, 2]\n    println(xs[5])\n",
+            "zam: list index out of bounds",
+            "zam: 列表下标越界",
+        ),
+        (
+            "zero",
+            "fn main():\n    let zero = 0\n    println(10 // zero)\n",
+            "zam: division by zero",
+            "zam: 除以零",
+        ),
+        (
+            "key",
+            "fn main():\n    let mut m: {string: i64} = {\"a\": 1}\n    println(m[\"b\"])\n",
+            "zam: key not found",
+            "zam: 找不到这个键",
+        ),
+        (
+            "overflow",
+            "fn main():\n    let big = 9223372036854775807\n    println(big + 1)\n",
+            "zam: integer arithmetic error",
+            "zam: 整数运算出错",
+        ),
+    ] {
+        let path = root.join(format!("{name}.zm"));
+        fs::write(&path, source).unwrap();
+        for (lang, expected) in [("en", en), ("zh", zh)] {
+            let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+                .arg("run")
+                .arg(&path)
+                .env("ZAMAK_CACHE_DIR", &cache)
+                .env("ZAMAK_LANG", lang)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{name}/{lang}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(expected),
+                "{name}/{lang}: expected {expected:?} in\n{stderr}"
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn error_values() {
     let path = std::env::temp_dir().join(format!("zam-errors-{}.zm", std::process::id()));

@@ -28,7 +28,49 @@ const RUNTIME: &str = r#"#if !defined(_WIN32) && !defined(__APPLE__)
 #include <limits.h>
 #include <math.h>
 #include <time.h>
-static void arithmetic_error(void) { fputs("zam: integer arithmetic error\n", stderr); exit(1); }
+// 运行时的报错（下标越界、除以零等）按 ZAMAK_LANG 显示：与编译器一致，设了 zh 就用中文，
+// 不设时跟随系统语言（Unix 看 LC_ALL、LC_MESSAGES、LANG，Windows 看 LANG）。只读一次。
+static int zam_chinese(void) {
+    static int state = -1;
+    if (state < 0) {
+        const char *lang = getenv("ZAMAK_LANG");
+        if (!lang || !*lang) lang = getenv("LC_ALL");
+        if (!lang || !*lang) lang = getenv("LC_MESSAGES");
+        if (!lang || !*lang) lang = getenv("LANG");
+        state = lang && (lang[0] == 'z' || lang[0] == 'Z') && (lang[1] == 'h' || lang[1] == 'H');
+    }
+    return state;
+}
+// 报错原文 → 中文。原文同时是查表的键，两边各写一次，其余地方只写原文。
+static const char *zam_zh(const char *en) {
+    static const struct { const char *en, *zh; } table[] = {
+        {"integer arithmetic error", "整数运算出错"},
+        {"division by zero", "除以零"},
+        {"array index out of bounds", "数组下标越界"},
+        {"allocation failed", "内存分配失败"},
+        {"time value out of range", "时间值超出范围"},
+        {"string index out of bounds", "字符串下标越界"},
+        {"negative exponent in an integer power; use floats such as 2.0 ** -1.0", "整数次幂的指数不能为负；要用小数写，例如 2.0 ** -1.0"},
+        {"random.randint needs a <= b", "random.randint 要求 a <= b"},
+        {"random.randrange needs start < stop", "random.randrange 要求 start < stop"},
+        {"exit code must be between 0 and 255", "退出码必须在 0 到 255 之间"},
+        {"f64 value out of i64 range", "f64 的值超出 i64 的范围"},
+        {"fmt.fixed digits must be between 0 and 30", "fmt.fixed 的小数位数必须在 0 到 30 之间"},
+        {"invalid code point", "码点不合法"},
+        {"key not found", "找不到这个键"},
+        {"list index out of bounds", "列表下标越界"},
+        {"pop from empty list", "对空列表调用 pop"},
+        {"min() of an empty list", "对空列表调用 min()"},
+        {"max() of an empty list", "对空列表调用 max()"},
+        {NULL, NULL},
+    };
+    int i;
+    if (!zam_chinese()) return en;
+    for (i = 0; table[i].en; i++) if (strcmp(table[i].en, en) == 0) return table[i].zh;
+    return en;
+}
+static void zam_panic_one(const char *en) { fflush(stdout); fprintf(stderr, "zam: %s\n", zam_zh(en)); }
+static void arithmetic_error(void) { zam_panic_one("integer arithmetic error"); exit(1); }
 // 移位量只能是 0–63；左移按无符号做（丢掉移出的位，不算溢出），右移是算术右移（向负无穷取整）。
 static int64_t zam_shl(int64_t a, int64_t n) { if (n < 0 || n > 63) arithmetic_error(); return (int64_t)((uint64_t)a << n); }
 static int64_t zam_shr(int64_t a, int64_t n) { if (n < 0 || n > 63) arithmetic_error(); return a >= 0 ? a >> n : ~(~a >> n); }
@@ -64,7 +106,7 @@ static int64_t mul(int64_t a, int64_t b) {
 }
 #endif
 // 除以零与 Python 一样报 division by zero。
-static void zam_zero_division(void) { fputs("zam: division by zero\n", stderr); exit(1); }
+static void zam_zero_division(void) { zam_panic_one("division by zero"); exit(1); }
 static int64_t quotient(int64_t a, int64_t b) {
     if (!b) zam_zero_division();
     if (a == INT64_MIN && b == -1) arithmetic_error();
@@ -124,7 +166,7 @@ static void zam_clamp(int64_t *from, int64_t *to, size_t length) {
 }
 static int64_t checked_index(int64_t index, size_t length) {
     if (index < 0) index += (int64_t)length;
-    if (index < 0 || (uintmax_t)index >= length) { fputs("zam: array index out of bounds\n", stderr); exit(1); }
+    if (index < 0 || (uintmax_t)index >= length) { zam_panic_one("array index out of bounds"); exit(1); }
     return index;
 }
 #ifdef _WIN32
@@ -151,7 +193,7 @@ static int zam_write(FILE *f, const unsigned char *p, size_t n) {
         wchar_t *wide;
         if (count <= 0 || fflush(f) == EOF) return 0;
         wide = (wchar_t*)malloc((size_t)count * sizeof(wchar_t));
-        if (!wide) { fputs("zam: allocation failed\n", stderr); exit(1); }
+        if (!wide) { zam_panic_one("allocation failed"); exit(1); }
         MultiByteToWideChar(65001, 0, (const char*)p, (int)n, wide, count);
         while (at < count) {
             chunk = count - at < 8192 ? count - at : 8192;
@@ -171,7 +213,7 @@ static int zam_write(FILE *f, const unsigned char *p, size_t n) {
 typedef struct { unsigned char *data; size_t len; size_t chars; } S;
 static S own(const unsigned char *p, size_t n) {
     S s; s.data = (unsigned char*)malloc(n ? n : 1); s.len = n; s.chars = 0;
-    if (!s.data) { fputs("zam: allocation failed\n", stderr); exit(1); }
+    if (!s.data) { zam_panic_one("allocation failed"); exit(1); }
     if (n) memcpy(s.data, p, n); return s;
 }
 static void drop(S *s) { free(s->data); s->data = NULL; s->len = 0; s->chars = 0; }
@@ -217,14 +259,14 @@ static S copy(S *s) { return own(s->data, s->len); }
 // extern fn 的 &string 参数：复制成以 \0 结尾的 C 字符串，调用后释放。
 static char *zam_cstr(S *s) {
     char *p = (char*)malloc(s->len + 1);
-    if (!p) { fputs("zam: allocation failed\n", stderr); exit(1); }
+    if (!p) { zam_panic_one("allocation failed"); exit(1); }
     if (s->len) memcpy(p, s->data, s->len);
     p[s->len] = 0; return p;
 }
 static S cat(S a, S b) {
     size_t n = a.len + b.len;
     unsigned char *p = (unsigned char*)malloc(n ? n : 1);
-    if (!p) { fputs("zam: allocation failed\n", stderr); exit(1); }
+    if (!p) { zam_panic_one("allocation failed"); exit(1); }
     if (a.len) memcpy(p, a.data, a.len);
     if (b.len) memcpy(p + a.len, b.data, b.len);
     drop(&a); drop(&b);
@@ -348,7 +390,7 @@ static int64_t zam_days(int64_t y, int64_t m, int64_t d) {
     return era * 146097 + doe - 719468;
 }
 static void zam_time_check(double t) {
-    if (t != t || t > 2.5e14 || t < -2.5e14) { fputs("zam: time value out of range\n", stderr); exit(1); }
+    if (t != t || t > 2.5e14 || t < -2.5e14) { zam_panic_one("time value out of range"); exit(1); }
 }
 // t 秒（向下取整）加上 offset 秒的时区偏移，写成 `2026-10-16T03:04:05`，再接上 zone。
 static S zam_time_text(double t, int64_t offset, const char *zone) {
@@ -402,7 +444,7 @@ static uint64_t zam_random_below(uint64_t range) {
 static double zam_random_unit(void) { return (double)(zam_random_next() >> 11) * (1.0 / 9007199254740992.0); }
 extern int zam_argc;
 extern char **zam_argv;
-static void zam_alloc_failed(void) { fputs("zam: allocation failed\n", stderr); exit(1); }
+static void zam_alloc_failed(void) { zam_panic_one("allocation failed"); exit(1); }
 // std/fs 的路径：UTF-8 里有 NUL 时返回 NULL（这样的路径不存在）。Windows 转成 UTF-16。
 #ifdef _WIN32
 static wchar_t *zam_path(S *path) {
@@ -478,7 +520,7 @@ static void zam_last_part(S *p, size_t *start, size_t *end) {
     *start = e;
 }
 static int zam_space(unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'; }
-static void zam_string_bounds(void) { fputs("zam: string index out of bounds\n", stderr); exit(1); }
+static void zam_string_bounds(void) { zam_panic_one("string index out of bounds"); exit(1); }
 // 从 p 开始的一个 UTF-8 字符：返回字节数并写出码点；不合法（截断、过长编码、代理区、超出范围）时返回 0。
 static size_t zam_utf8_next(const unsigned char *p, size_t n, int64_t *code) {
     size_t len, i; uint32_t c;
@@ -855,7 +897,7 @@ const BUILTINS: &[Builtin] = &[
         result: Type::Int,
         fallible: false,
         // `a ** b`：按位快速幂，乘法溢出与 `*` 一样报错；整数不能有负指数。
-        body: r#"if (p1 < 0) { fputs("zam: negative exponent in an integer power; use floats such as 2.0 ** -1.0\n", stderr); exit(1); }
+        body: r#"if (p1 < 0) { zam_panic_one("negative exponent in an integer power; use floats such as 2.0 ** -1.0"); exit(1); }
 int64_t r = 1;
 while (p1 > 0) { if (p1 & 1) r = mul(r, p0); p1 >>= 1; if (p1 > 0) p0 = mul(p0, p0); }
 return r;"#,
@@ -955,7 +997,7 @@ return zam_time_text(p0, offset, zone);"#,
         result: Type::Int,
         fallible: false,
         // 两端都包含，与 Python 的 random.randint 相同。
-        body: r#"if (p0 > p1) { fputs("zam: random.randint needs a <= b\n", stderr); exit(1); }
+        body: r#"if (p0 > p1) { zam_panic_one("random.randint needs a <= b"); exit(1); }
 return (int64_t)((uint64_t)p0 + zam_random_below((uint64_t)p1 - (uint64_t)p0 + 1));"#,
     },
     Builtin {
@@ -964,7 +1006,7 @@ return (int64_t)((uint64_t)p0 + zam_random_below((uint64_t)p1 - (uint64_t)p0 + 1
         result: Type::Int,
         fallible: false,
         // 不含终点，与 for i in a..b 相同。
-        body: r#"if (p0 >= p1) { fputs("zam: random.randrange needs start < stop\n", stderr); exit(1); }
+        body: r#"if (p0 >= p1) { zam_panic_one("random.randrange needs start < stop"); exit(1); }
 return (int64_t)((uint64_t)p0 + zam_random_below((uint64_t)p1 - (uint64_t)p0));"#,
     },
     Builtin {
@@ -1181,7 +1223,7 @@ return own(p0->data, 0);"#,
         result: Type::Unit,
         fallible: false,
         // 退出码限定在 0–255：Unix 只保留低 8 位，限定后三个平台行为一致。
-        body: r#"if (p0 < 0 || p0 > 255) { fputs("zam: exit code must be between 0 and 255\n", stderr); exit(1); }
+        body: r#"if (p0 < 0 || p0 > 255) { zam_panic_one("exit code must be between 0 and 255"); exit(1); }
 fflush(stdout);
 exit((int)p0);"#,
     },
@@ -1205,7 +1247,7 @@ exit((int)p0);"#,
         result: Type::Int,
         fallible: false,
         // 向零截断；NaN 与超出 i64 的值没有对应整数，按运行时错误停下。
-        body: r#"if (!(p0 >= -9223372036854775808.0 && p0 < 9223372036854775808.0)) { fputs("zam: f64 value out of i64 range\n", stderr); exit(1); }
+        body: r#"if (!(p0 >= -9223372036854775808.0 && p0 < 9223372036854775808.0)) { zam_panic_one("f64 value out of i64 range"); exit(1); }
 return (int64_t)p0;"#,
     },
     Builtin {
@@ -1249,7 +1291,7 @@ return (int64_t)p0;"#,
         result: Type::Owned,
         fallible: false,
         body: r#"char text[48]; int n; S s; s.chars = 0;
-if (p1 < 0 || p1 > 30) { fputs("zam: fmt.fixed digits must be between 0 and 30\n", stderr); exit(1); }
+if (p1 < 0 || p1 > 30) { zam_panic_one("fmt.fixed digits must be between 0 and 30"); exit(1); }
 if (p0 != p0 || p0 == HUGE_VAL || p0 == -HUGE_VAL) return own((const unsigned char*)text, zam_f64_text(p0, text));
 n = snprintf(NULL, 0, "%.*f", (int)p1, p0);
 s.data = (unsigned char*)malloc((size_t)n + 1);
@@ -1704,7 +1746,7 @@ return out;"#,
         result: Type::Owned,
         fallible: false,
         body: r#"unsigned char text[4]; size_t n = zam_utf8_put(p0, text);
-if (!n) { fputs("zam: invalid code point\n", stderr); exit(1); }
+if (!n) { zam_panic_one("invalid code point"); exit(1); }
 return own(text, n);"#,
     },
     Builtin {
@@ -1986,7 +2028,7 @@ fn elem_suffix(elem: Elem) -> String {
 fn map_name(key: Elem, value: Elem) -> String {
     format!("M{}{}", elem_suffix(key), elem_suffix(value))
 }
-const MAP_PRELUDE: &str = r#"static void map_missing(void) { fputs("zam: key not found\n", stderr); exit(1); }
+const MAP_PRELUDE: &str = r#"static void map_missing(void) { zam_panic_one("key not found"); exit(1); }
 static uint64_t zam_hash_int(int64_t key) { uint64_t x = (uint64_t)key; x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ULL; x ^= x >> 33; return x; }
 static uint64_t zam_hash_str(S *key) { uint64_t h = 1469598103934665603ULL; size_t i; for (i = 0; i < key->len; i++) { h ^= key->data[i]; h *= 1099511628211ULL; } return h; }
 "#;
@@ -2143,9 +2185,9 @@ fn drop_elem(elem: Elem, slot: &str) -> String {
         _ => String::new(),
     }
 }
-const LIST_PRELUDE: &str = r#"static void list_bounds(void) { fputs("zam: list index out of bounds\n", stderr); exit(1); }
-static void list_empty(void) { fputs("zam: pop from empty list\n", stderr); exit(1); }
-static void list_alloc_failed(void) { fputs("zam: allocation failed\n", stderr); exit(1); }
+const LIST_PRELUDE: &str = r#"static void list_bounds(void) { zam_panic_one("list index out of bounds"); exit(1); }
+static void list_empty(void) { zam_panic_one("pop from empty list"); exit(1); }
+static void list_alloc_failed(void) { zam_panic_one("allocation failed"); exit(1); }
 // 小列表缓冲区的空闲链表：按 16 字节分级，释放时留给下一次同级分配，最多缓存 32 MB。
 // 每块都是 malloc 来的真实内存块，别处直接 free 它也没问题，只是不回到这里。
 // 放进第 k 级的块至少有 16k 字节（按声明大小向下取级），取出时按请求向上取级。
@@ -2345,8 +2387,8 @@ static int64_t index{l}({l} *l, {param} v) {{ size_t i; for (i = 0; i < l->len; 
 static int has{l}({l} *l, {param} v) {{ return index{l}(l, v) >= 0; }}
 static {l} slice{l}({l} *l, int64_t from, int64_t to) {{ {l} out = {{0}}; int64_t i; zam_clamp(&from, &to, l->len); for (i = from; i < to; i++) {{ {t} x = l->data[i]; push{l}(&out, {copy}); }} return out; }}
 static {l} sorted{l}({l} *l) {{ {l} out = slice{l}(l, 0, (int64_t)l->len); sort{l}(&out); return out; }}
-static {t} min{l}({l} *l) {{ size_t i, best = 0; if (!l->len) {{ fputs(\"zam: min() of an empty list\\n\", stderr); exit(1); }} for (i = 1; i < l->len; i++) if (cmp{l}(&l->data[i], &l->data[best]) < 0) best = i; {{ {t} x = l->data[best]; return {copy}; }} }}
-static {t} max{l}({l} *l) {{ size_t i, best = 0; if (!l->len) {{ fputs(\"zam: max() of an empty list\\n\", stderr); exit(1); }} for (i = 1; i < l->len; i++) if (cmp{l}(&l->data[i], &l->data[best]) > 0) best = i; {{ {t} x = l->data[best]; return {copy}; }} }}
+static {t} min{l}({l} *l) {{ size_t i, best = 0; if (!l->len) {{ zam_panic_one(\"min() of an empty list\"); exit(1); }} for (i = 1; i < l->len; i++) if (cmp{l}(&l->data[i], &l->data[best]) < 0) best = i; {{ {t} x = l->data[best]; return {copy}; }} }}
+static {t} max{l}({l} *l) {{ size_t i, best = 0; if (!l->len) {{ zam_panic_one(\"max() of an empty list\"); exit(1); }} for (i = 1; i < l->len; i++) if (cmp{l}(&l->data[i], &l->data[best]) > 0) best = i; {{ {t} x = l->data[best]; return {copy}; }} }}
 {sum}"
     )
 }
