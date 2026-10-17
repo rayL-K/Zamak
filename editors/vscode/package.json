@@ -62,6 +62,15 @@
       {
         "command": "zamak.restartServer",
         "title": "Zamak: Restart Language Server"
+      },
+      {
+        "command": "zamak.install",
+        "title": "Zamak: Install the zam Compiler (npm)",
+        "markdownDescription": "Runs `npm install -g zamak` in a terminal."
+      },
+      {
+        "command": "zamak.recheck",
+        "title": "Zamak: Check for the zam Compiler Again"
       }
     ]
   },
