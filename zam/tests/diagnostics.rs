@@ -423,13 +423,13 @@ fn json_codes_classify_real_sources() {
 /// 断言，反过来也不许断言了却没写进文档的码。任一侧单独更新，AI 循环就会照过期契约走。
 #[test]
 fn documented_codes_are_all_covered_by_real_sources() {
-    // 兜底分类没有稳定的可复现源文；文档本身要求 AI 保留完整 message 并提交最小复现。
-    const WITHOUT_REPRODUCIBLE_SOURCE: &[&str] = &["ZM999"];
+    // ZM999 是兜底分类：码表里保留它，说明「没归类的工具错误」这一档确实存在，
+    // 但不要求（也不该有）能复现的源码——真出现了就说明该补一条分类。
     let mut documented: Vec<&str> = include_str!("../../docs/AI_WORKFLOW.md")
         .lines()
         .filter_map(|line| line.strip_prefix("- `"))
         .filter_map(|rest| rest.split('`').next())
-        .filter(|code| !WITHOUT_REPRODUCIBLE_SOURCE.contains(code))
+        .filter(|code| *code != "ZM999")
         .collect();
     // 同一个码可以有多段源码（ZM201 就分了变量与函数两种），所以比的是去重后的集合。
     let mut asserted: Vec<&str> = REAL_SOURCE_CODES.iter().map(|(_, code, _)| *code).collect();
@@ -450,6 +450,33 @@ fn documented_codes_are_all_covered_by_real_sources() {
     assert!(
         only_documented.is_empty() && only_asserted.is_empty(),
         "文档码表与真实源码断言不一致：只有文档 {only_documented:?}，只有断言 {only_asserted:?}"
+    );
+}
+
+/// 反例里不该再出现 ZM999：它意味着某条报错没有归类，AI 拿不到稳定的码可判断。
+/// 这里把 `REAL_SOURCE_CODES` 的全部反例再跑一遍，任何一条落到 ZM999 就失败。
+#[test]
+fn real_counterexamples_never_fall_back_to_zm999() {
+    let path = std::env::temp_dir().join(format!("zam-no-zm999-{}.zm", std::process::id()));
+    let mut unclassified = Vec::new();
+    for (source, expected, _) in REAL_SOURCE_CODES {
+        fs::write(&path, source).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+            .args(["check", "--json"])
+            .arg(&path)
+            .env("ZAMAK_LANG", "en")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout.contains("\"code\":\"ZM999\"") {
+            unclassified.push(format!("{expected}: {source:?} -> {stdout}"));
+        }
+    }
+    let _ = fs::remove_file(&path);
+    assert!(
+        unclassified.is_empty(),
+        "这些反例落到了 ZM999（应归到对应的码）：\n{}",
+        unclassified.join("\n")
     );
 }
 
