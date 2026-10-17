@@ -91,6 +91,8 @@ pub struct Project {
     pub name: String,
     pub root: PathBuf,
     entry: String,
+    // 直接检查单个 .zm 文件（不是项目）：报错里只有一个模块，函数名前的 `main:` 前缀是多余的。
+    single: bool,
     modules: BTreeMap<String, Input>,
     // 项目与各个依赖包的 `[native]`：（包的根目录, 设置）。
     native: Vec<(PathBuf, package::Native)>,
@@ -138,6 +140,36 @@ fn read_source(path: &Path) -> std::io::Result<String> {
 
 fn is_source(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "zm")
+}
+
+/// 单文件项目只有一个模块，报错里 `line L, column C: <模块>:<函数>: <信息>` 的 `<模块>` 是多余
+/// 的（文件名已经指向它），去掉后读作 `line L, column C: <信息>`。
+/// 消息正文里的 `模块:函数`（例如参数为 `main:f`）保留：那些是名字，不是位置标记。
+fn strip_function_module(error: &str) -> String {
+    let Some((position, rest)) = error.split_once(": ") else {
+        return error.to_owned();
+    };
+    let Some((head, message)) = rest.split_once(": ") else {
+        return error.to_owned();
+    };
+    match head.split_once(':') {
+        // `main:main: ...`：模块与函数名都去掉。
+        Some((module, name)) if is_identifier(module, true) && is_identifier(name, false) => {
+            format!("{position}: {message}")
+        }
+        // `main: borrow conflict: ...`：错误本身已经没有函数名，只去掉模块名。
+        None if is_identifier(head, true) => format!("{position}: {message}"),
+        _ => error.to_owned(),
+    }
+}
+
+/// 诊断里的 `<模块>:<函数>` 前缀只用标识符字符（模块路径可带 `/`）。
+fn is_identifier(text: &str, slash: bool) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || (slash && c == '/'))
 }
 
 type Parse = fn(&str) -> std::result::Result<compiler::Module, String>;
@@ -272,6 +304,7 @@ impl Project {
                 name: "main".into(),
                 root: input.parent().unwrap_or(Path::new(".")).into(),
                 entry: "main".into(),
+                single: true,
                 modules: BTreeMap::from([(
                     "main".into(),
                     Input {
@@ -355,6 +388,7 @@ impl Project {
             name,
             root,
             entry,
+            single: false,
             modules,
             native,
             library,
@@ -741,6 +775,15 @@ impl Project {
         {
             return error;
         }
+        // 单文件项目只有一个模块：报错里 `<模块>:` 前缀是多余的（文件名已经指出位置）。
+        let error = if self.single {
+            match error.strip_prefix(&format!("{module}: ")) {
+                Some(rest) => rest.to_owned(),
+                None => error,
+            }
+        } else {
+            error
+        };
         self.with_module_path(
             module,
             format!("line {}, column {}: {error}", position.0, position.1),
@@ -761,6 +804,11 @@ impl Project {
             return error;
         };
         let module = module.to_string();
+        let error = if self.single {
+            strip_function_module(&error)
+        } else {
+            error
+        };
         self.with_module_path(&module, error)
     }
 

@@ -522,6 +522,57 @@ fn module_resolution_errors_include_location() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// 直接检查单个 `.zm` 文件时只有一个模块，报错里 `<模块>:` 前缀指的还是这个文件本身，读起来是噪音。
+/// 单文件去掉它，项目里保留（项目有多个模块，前缀才说明出错的是哪一个）。
+#[test]
+fn single_file_diagnostics_omit_the_module_prefix() {
+    let root = std::env::temp_dir().join(format!("zam-single-prefix-{}", std::process::id()));
+    fs::create_dir_all(root.join("src")).unwrap();
+    let file = root.join("main.zm");
+    fs::write(&file, "fn main():\n    nope()\n").unwrap();
+
+    for (lang, expected) in [("en", "unknown function nope"), ("zh", "未知的函数 nope")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+            .args(["check", "--json"])
+            .arg(&file)
+            .env("ZAMAK_LANG", lang)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(!output.status.success(), "{stdout}");
+        // --json 始终是英文原文，中文只在终端渲染时经 zh::text() 翻译。
+        assert!(stdout.contains("unknown function nope"), "{stdout}");
+        assert!(!stdout.contains("main: unknown function nope"), "{stdout}");
+        let rendered = Command::new(env!("CARGO_BIN_EXE_zam"))
+            .arg("check")
+            .arg(&file)
+            .env("ZAMAK_LANG", lang)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&rendered.stderr).into_owned();
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains("main："), "{text}");
+        assert!(!text.contains("main: "), "{text}");
+    }
+
+    // 项目里保留模块名：它指出出错的是哪个模块。
+    fs::write(
+        root.join("zam.toml"),
+        "[project]\nname = \"probe\"\nentry = \"src/main.zm\"\nmodules = \"src\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("src").join("main.zm"), "fn main():\n    nope()\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zam"))
+        .args(["check", "--json"])
+        .arg(&root)
+        .env("ZAMAK_LANG", "en")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(stdout.contains("main: unknown function nope"), "{stdout}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn ambiguous_imports_are_classified_as_name_diagnostics() {
     let root = std::env::temp_dir().join(format!("zam-ambiguous-import-{}", std::process::id()));
@@ -588,7 +639,7 @@ fn catch_resolution_errors_keep_inner_location() {
         );
         fs::write(&file, &source).unwrap();
         fs::write(&module, &source).unwrap();
-        for (input, reported) in [(&file, &file), (&root, &module)] {
+        for (input, reported, prefix) in [(&file, &file, ""), (&root, &module, "main: ")] {
             let output = Command::new(env!("CARGO_BIN_EXE_zam"))
                 .args(["check", "--json"])
                 .arg(input)
@@ -603,7 +654,9 @@ fn catch_resolution_errors_keep_inner_location() {
                 format!("\"line\":{line},"),
                 format!("\"column\":{column},"),
                 "\"code\":\"ZM203\"".to_string(),
-                "\"message\":\"main: ambiguous or missing import for missing.call\"".to_string(),
+                format!(
+                    "\"message\":\"{prefix}ambiguous or missing import for missing.call\""
+                ),
             ] {
                 assert!(stdout.contains(&field), "{field} missing from {stdout}");
             }

@@ -493,7 +493,13 @@ fn diagnostic(entry: &str, error: &str) -> Diagnostic {
         None => (None, rest.clone()),
     };
     let message = with_python_hint(message);
-    let (code, category, suggestion) = classify(&message);
+    // 模块解析期的错误在整条信息里只带 `模块:`（没有函数名），上面的 `模块:函数:` 分支认不出来，
+    // `message` 会留着这个前缀；classify 按句子开头匹配，先去掉它再分。
+    let body = match message.split_once(": ") {
+        Some((head, tail)) if identifier(head, true) => tail.to_owned(),
+        _ => message.clone(),
+    };
+    let (code, category, suggestion) = classify(&body);
     Diagnostic {
         file,
         line,
@@ -733,7 +739,9 @@ fn classify(message: &str) -> (&'static str, &'static str, Option<&'static str>)
             "type",
             Some("end every path of the fn body with a value or a return statement"),
         )
-    } else if message.starts_with("cannot assign immutable value ") {
+    } else if message.starts_with("cannot assign immutable value ")
+        || message.contains("cannot assign to the constant ")
+    {
         (
             "ZM302",
             "ownership",
