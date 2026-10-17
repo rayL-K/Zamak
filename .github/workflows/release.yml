@@ -154,12 +154,17 @@ jobs:
           merge-multiple: true
       - name: Publish to npm
         env:
+          # The first release publishes with the NPM_TOKEN secret. After that, npm's trusted
+          # publishing (OIDC, needs npm 11.5.1 or later) replaces the token: set the repository
+          # variable NPM_TRUSTED to true and delete the secret.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TRUSTED: ${{ vars.NPM_TRUSTED }}
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "NPM_TOKEN isn't set; skipping npm."
+          if [ -z "$NODE_AUTH_TOKEN" ] && [ "$NPM_TRUSTED" != "true" ]; then
+            echo "Neither NPM_TOKEN nor trusted publishing is set up; skipping npm."
             exit 0
           fi
+          npm install -g npm@11
           version="${GITHUB_REF_NAME#v}"
           # Pre-releases go to the "next" tag, so `npm install -g zamak` keeps installing the latest release.
           tag=latest
