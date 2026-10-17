@@ -78,6 +78,15 @@ Claude Code 和 Cursor 打开项目时会读取 `.mcp.json`。其他 AI 助手�
 
 这些工具调用的就是 `zam` 本身，所以结果和你在命令行里看到的完全一样。
 
+服务器还提供两份[资源](https://modelcontextprotocol.io/docs/concepts/resources)：MCP 客户端可以把它们一次装进助手的上下文，不必每次都调工具。
+
+| 资源 | 内容 |
+| --- | --- |
+| `zamak://reference` | 一页纸的语言参考：语法、类型、所有权、错误处理和标准库。 |
+| `zamak://diagnostics` | 每个错误码的分类与含义，从 `check` 拿到的码不用再问一次就能读懂。 |
+
+两份内容就是 `docs` 与 `explain` 工具返回的同一段文字，所以总是和编译器同步。
+
 ## 小结
 
 - `zam new NAME --template ai` 为 Claude Code 配好 `SKILL.md`，为其他 AI 助手配好 `AGENTS.md`。

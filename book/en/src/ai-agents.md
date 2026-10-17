@@ -78,6 +78,15 @@ Claude Code and Cursor pick up `.mcp.json` when you open the project. For anothe
 
 The tools run `zam` itself, so their results are exactly what you'd see on the command line.
 
+The server also publishes two [resources](https://modelcontextprotocol.io/docs/concepts/resources), which an MCP client can load into the agent's context once instead of calling a tool every time:
+
+| Resource | What it holds |
+| --- | --- |
+| `zamak://reference` | The one-page language reference: syntax, types, ownership, errors, and the standard library. |
+| `zamak://diagnostics` | Every diagnostic code with its category and meaning, so a code from `check` can be read without another call. |
+
+Both are the same text the `docs` and `explain` tools return, so they stay in step with the compiler.
+
 ## Summary
 
 - `zam new NAME --template ai` sets up `SKILL.md` for Claude Code and `AGENTS.md` for other agents.

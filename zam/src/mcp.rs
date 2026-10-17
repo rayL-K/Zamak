@@ -7,6 +7,9 @@
 //! - `explain`：按错误码（如 ZM301）给出含义与改法。
 //! - `docs`：一页纸语言参考（与 `zam new --template ai` 生成的相同）、某个标准库模块的函数签名，
 //!   或参考里与关键词有关的段落。
+//!
+//! 资源（`resources/list`、`resources/read`）：一页纸语言参考（`zamak://reference`）与错误码表
+//! （`zamak://diagnostics`），客户端可以把它们挂在上下文里，不用每次都调 `docs`、`explain`。
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
@@ -18,6 +21,9 @@ const PROTOCOL: &str = "2025-06-18";
 /// 工具输出的上限：太长的程序输出截断，免得塞满助手的上下文。
 const LIMIT: usize = 64 * 1024;
 const DIAGNOSTICS: &str = include_str!("../../book/en/src/appendix-diagnostics.md");
+/// MCP 资源的 URI：语言参考与错误码表。
+const REFERENCE_URI: &str = "zamak://reference";
+const DIAGNOSTICS_URI: &str = "zamak://diagnostics";
 
 pub fn run() -> crate::project::Result<()> {
     let stdin = std::io::stdin();
@@ -52,9 +58,9 @@ fn handle(message: &Value) -> Option<Value> {
     let result = match message["method"].as_str().unwrap_or_default() {
         "initialize" => Ok(json!({
             "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL),
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": {}, "resources": {} },
             "serverInfo": { "name": "zamak", "title": "Zamak", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Tools for the Zamak programming language. Call docs before you write Zamak code, check after every change, and explain when a diagnostic code is unclear. Paths are relative to the folder the server runs in; \".\" is the current project.",
+            "instructions": "Tools and resources for the Zamak programming language. Read the zamak://reference resource (or call docs) before you write Zamak code, check after every change, and explain when a diagnostic code is unclear. Paths are relative to the folder the server runs in; \".\" is the current project.",
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
@@ -62,6 +68,19 @@ fn handle(message: &Value) -> Option<Value> {
             params["name"].as_str().unwrap_or_default(),
             &params["arguments"],
         )),
+        "resources/list" => Ok(json!({ "resources": resources() })),
+        "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
+        "resources/read" => {
+            let uri = params["uri"].as_str().unwrap_or_default();
+            match resource(uri) {
+                Some(text) => Ok(json!({
+                    "contents": [{ "uri": uri, "mimeType": "text/markdown", "text": text }],
+                })),
+                None => {
+                    Err(json!({ "code": -32602, "message": format!("unknown resource {uri}") }))
+                }
+            }
+        }
         method => Err(json!({ "code": -32601, "message": format!("unknown method {method}") })),
     };
     Some(match result {
@@ -135,6 +154,35 @@ fn tools() -> Value {
             "annotations": read_only,
         },
     ])
+}
+
+/// `resources/list`：挂在上下文里就能用的两份文档。
+fn resources() -> Value {
+    json!([
+        {
+            "uri": REFERENCE_URI,
+            "name": "Zamak language reference",
+            "title": "Zamak language reference",
+            "description": "A one-page reference: syntax, types, ownership, errors, and the standard library. Read it before you write Zamak code.",
+            "mimeType": "text/markdown",
+        },
+        {
+            "uri": DIAGNOSTICS_URI,
+            "name": "Zamak diagnostic codes",
+            "title": "Zamak diagnostic codes",
+            "description": "Every diagnostic code with its category and meaning, so a code from check --json can be explained without another call.",
+            "mimeType": "text/markdown",
+        },
+    ])
+}
+
+/// `resources/read`：按 URI 取出文档原文；没有这个 URI 时返回 None。
+fn resource(uri: &str) -> Option<String> {
+    match uri {
+        REFERENCE_URI => Some(crate::REFERENCE.to_owned()),
+        DIAGNOSTICS_URI => Some(DIAGNOSTICS.to_owned()),
+        _ => None,
+    }
 }
 
 fn text(content: String, error: bool) -> Value {
@@ -419,6 +467,56 @@ pub fn project_config() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resources_serve_the_reference_and_the_code_table() {
+        let listed =
+            handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" })).unwrap();
+        let uris: Vec<&str> = listed["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|resource| resource["uri"].as_str().unwrap())
+            .collect();
+        assert_eq!(uris, vec![REFERENCE_URI, DIAGNOSTICS_URI]);
+
+        let reference = handle(
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": REFERENCE_URI } }),
+        )
+        .unwrap();
+        let served = reference["result"]["contents"][0]["text"].as_str().unwrap();
+        assert_eq!(served, crate::REFERENCE, "the reference is served verbatim");
+        assert_eq!(
+            reference["result"]["contents"][0]["mimeType"],
+            "text/markdown"
+        );
+
+        let codes = handle(
+            &json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": DIAGNOSTICS_URI } }),
+        )
+        .unwrap();
+        let table = codes["result"]["contents"][0]["text"].as_str().unwrap();
+        for code in ["ZM110", "ZM201", "ZM301", "ZM421", "ZM500", "ZM900"] {
+            assert!(table.contains(&format!("| `{code}` |")), "{code} missing");
+        }
+
+        // 没有的 URI 是错误，不是空内容。
+        let unknown = handle(
+            &json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": { "uri": "zamak://nope" } }),
+        )
+        .unwrap();
+        assert_eq!(unknown["error"]["code"], -32602);
+        assert!(unknown.get("result").is_none());
+
+        // initialize 要声明支持 resources，客户端才会去列。
+        let init =
+            handle(&json!({ "jsonrpc": "2.0", "id": 5, "method": "initialize", "params": {} }))
+                .unwrap();
+        assert!(
+            init["result"]["capabilities"]["resources"].is_object(),
+            "{init}"
+        );
+    }
 
     #[test]
     fn explain_reads_the_diagnostics_appendix() {
