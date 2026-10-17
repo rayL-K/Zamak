@@ -327,3 +327,93 @@ fn main():
     assert!(client.child.wait().unwrap().success());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `textDocument/references`、`prepareRename` 与 `rename`：本文件内的局部变量和函数，
+/// 注释与字符串里同名的文字不算引用。
+#[test]
+fn references_and_rename_cover_local_names() {
+    let root = std::env::temp_dir().join(format!("zam-lsp-rename-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = "\
+fn total(n: i64) -> i64:
+    n * 2
+
+fn main():
+    # total is computed twice
+    let total = total(3)
+    println(total)
+    println(\"total\")
+    println(total + 1)
+";
+    let file = root.join("main.zm");
+    std::fs::write(&file, source).unwrap();
+    let file_uri = uri(&file);
+    let mut client = Client::start(&root);
+    let init = client.request(
+        "initialize",
+        json!({ "processId": null, "rootUri": uri(&root), "capabilities": {} }),
+    );
+    assert_eq!(init["capabilities"]["referencesProvider"], true);
+    assert_eq!(
+        init["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "zamak", "version": 1, "text": source } }),
+    );
+    let at = |line: u64, character: u64| json!({ "textDocument": { "uri": file_uri }, "position": { "line": line, "character": character } });
+
+    // 第 5 行 `    let total = total(3)` 里的局部变量 `total`（第 8 列起）。
+    let refs = client.request(
+        "textDocument/references",
+        json!({ "textDocument": { "uri": file_uri }, "position": { "line": 5, "character": 9 }, "context": { "includeDeclaration": true } }),
+    );
+    let lines: Vec<i64> = refs
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["range"]["start"]["line"].as_i64().unwrap())
+        .collect();
+    // 函数声明（第 0 行）、局部变量声明（第 5 行）、局部变量在 `total(3)` 里的调用（第 5 行）、
+    // 第 6 与第 8 行各一处；注释和字符串里同名的文字不算。
+    assert_eq!(lines, vec![0, 5, 5, 6, 8], "{refs}");
+
+    // 只有 `total(3)` 那处是函数调用，其余是局部变量；两者都被算上，因为都叫 total。
+    let prepared = client.request("textDocument/prepareRename", at(5, 9));
+    assert_eq!(prepared["placeholder"], "total", "{prepared}");
+    assert_eq!(
+        prepared["range"]["start"],
+        json!({ "line": 5, "character": 8 })
+    );
+
+    // 改名后所有引用都换成新名字。
+    let renamed = client.request(
+        "textDocument/rename",
+        json!({ "textDocument": { "uri": file_uri }, "position": { "line": 5, "character": 9 }, "newName": "sum" }),
+    );
+    let edits = renamed["changes"][&file_uri].as_array().unwrap().clone();
+    assert_eq!(edits.len(), 5, "{renamed}");
+    assert!(
+        edits.iter().all(|edit| edit["newText"] == "sum"),
+        "{renamed}"
+    );
+
+    // 保留字不能当新名字：直接拒绝，不给编辑。
+    let rejected = client.request(
+        "textDocument/rename",
+        json!({ "textDocument": { "uri": file_uri }, "position": { "line": 5, "character": 9 }, "newName": "fn" }),
+    );
+    assert_eq!(rejected["changes"], json!({}), "{rejected}");
+
+    // 空白处没有可改的名字。
+    let nothing = client.request("textDocument/prepareRename", at(7, 0));
+    assert!(nothing.is_null(), "{nothing}");
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    assert!(client.child.wait().unwrap().success());
+    let _ = std::fs::remove_dir_all(&root);
+}

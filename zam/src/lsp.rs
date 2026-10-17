@@ -96,6 +96,8 @@ impl Server {
                     "hoverProvider": true,
                     "definitionProvider": true,
                     "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
+                    "renameProvider": { "prepareProvider": true },
+                    "referencesProvider": true,
                     "documentFormattingProvider": true,
                 },
                 "serverInfo": { "name": "zam", "version": env!("CARGO_PKG_VERSION") },
@@ -135,6 +137,9 @@ impl Server {
             "textDocument/hover" => Some(self.request(params, hover)),
             "textDocument/definition" => Some(self.request(params, definition)),
             "textDocument/signatureHelp" => Some(self.request(params, signature_help)),
+            "textDocument/references" => Some(self.with_documents(params, references)),
+            "textDocument/prepareRename" => Some(self.with_documents(params, prepare_rename)),
+            "textDocument/rename" => Some(self.with_documents(params, rename)),
             "textDocument/formatting" => Some(self.formatting(params)),
             _ if id.is_some() => {
                 send(
@@ -177,6 +182,14 @@ impl Server {
             column,
         };
         answer(&context)
+    }
+
+    fn with_documents(
+        &self,
+        params: &Value,
+        answer: fn(&BTreeMap<String, String>, &Value) -> Value,
+    ) -> Value {
+        answer(&self.documents, params)
     }
 
     fn formatting(&self, params: &Value) -> Value {
@@ -1166,6 +1179,189 @@ fn signature_help(context: &Context) -> Value {
         "activeSignature": 0,
         "activeParameter": active_parameter,
     })
+}
+
+/// 第 `line` 行的第 `start` 个字符（0 起）处、横跨 `length` 个字符的范围（列号按 UTF-16）。
+fn span(line: usize, source: &str, start: usize, length: usize) -> Value {
+    let begin = utf16(source, start);
+    let end = utf16(source, start + length);
+    range(line, begin, line, end)
+}
+
+/// 光标所在的标识符：返回（名字, 起始字符下标, 字符数）。
+fn identifier_at(context: &Context) -> Option<(String, usize, usize)> {
+    let chars: Vec<char> = context.lines.get(context.line)?.chars().collect();
+    let ident = |c: &char| c.is_alphanumeric() || *c == '_';
+    let mut start = context.column.min(chars.len());
+    while start > 0 && ident(&chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = context.column.min(chars.len());
+    while end < chars.len() && ident(&chars[end]) {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    Some((chars[start..end].iter().collect(), start, end - start))
+}
+
+/// 本文件里 `name` 的每次出现：按标识符边界匹配，跳过注释（`#` 之后）与字符串字面量里的文字。
+fn occurrences(text: &str, name: &str) -> Vec<(usize, usize, usize)> {
+    let wanted: Vec<char> = name.chars().collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut found = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut index = 0;
+        while index < chars.len() {
+            let c = chars[index];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                index += 1;
+                continue;
+            }
+            if c == '"' {
+                in_string = true;
+                index += 1;
+                continue;
+            }
+            // `#` 之后是注释，剩下这一行都不用看。
+            if c == '#' && (index == 0 || chars[index - 1] != '\\') {
+                break;
+            }
+            let boundary = (index == 0 || !ident(chars[index - 1]))
+                && chars.get(index + wanted.len()).is_none_or(|c| !ident(*c));
+            if boundary && chars[index..].starts_with(&wanted) {
+                found.push((number, index, wanted.len()));
+                index += wanted.len();
+                continue;
+            }
+            index += 1;
+        }
+    }
+    found
+}
+
+/// 光标位置的上下文（供需要文档映射的处理函数共用）。
+fn context_at<'a>(text: &'a str, params: &Value) -> Option<Context<'a>> {
+    let line = params["position"]["line"].as_u64().unwrap_or(0) as usize;
+    let character = params["position"]["character"].as_u64().unwrap_or(0) as usize;
+    let lines: Vec<&str> = text.lines().collect();
+    let current = lines.get(line).copied().unwrap_or("");
+    Some(Context {
+        uri: "",
+        path: PathBuf::new(),
+        text,
+        lines,
+        line,
+        column: char_index(current, character),
+    })
+}
+
+/// `textDocument/references`：本文件里这个名字出现在哪些地方。`includeDeclaration` 为假时
+/// 去掉声明那一行。跨模块的引用先不做（那要按 `use` 去解析别的模块）。
+fn references(documents: &BTreeMap<String, String>, params: &Value) -> Value {
+    let uri = params["textDocument"]["uri"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let Some(text) = documents.get(&uri) else {
+        return Value::Null;
+    };
+    let Some(context) = context_at(text, params) else {
+        return json!([]);
+    };
+    let Some((name, _, _)) = identifier_at(&context) else {
+        return json!([]);
+    };
+    let include_declaration = params["context"]["includeDeclaration"]
+        .as_bool()
+        .unwrap_or(true);
+    let declaration = declarations(text)
+        .into_iter()
+        .find(|d| d.name == name)
+        .map(|d| d.line);
+    json!(occurrences(text, &name)
+        .into_iter()
+        .filter(|(number, _, _)| include_declaration || Some(*number) != declaration)
+        .map(|(number, start, length)| {
+            json!({ "uri": uri, "range": span(number, context.lines[number], start, length) })
+        })
+        .collect::<Vec<_>>())
+}
+
+/// `textDocument/prepareRename`：报告会被一起改掉的范围，编辑器据此弹出输入框；
+/// 光标不在标识符上时返回 null，编辑器就不会弹出。
+fn prepare_rename(documents: &BTreeMap<String, String>, params: &Value) -> Value {
+    let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+    let Some(text) = documents.get(uri) else {
+        return Value::Null;
+    };
+    let Some(context) = context_at(text, params) else {
+        return Value::Null;
+    };
+    let Some((name, start, length)) = identifier_at(&context) else {
+        return Value::Null;
+    };
+    json!({
+        "range": span(context.line, context.lines[context.line], start, length),
+        "placeholder": name,
+    })
+}
+
+/// `textDocument/rename`：把本文件里这个名字的所有出现改成新名字。跨模块重命名留到以后。
+fn rename(documents: &BTreeMap<String, String>, params: &Value) -> Value {
+    let uri = params["textDocument"]["uri"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let Some(text) = documents.get(&uri) else {
+        return Value::Null;
+    };
+    let Some(new_name) = params["newName"].as_str() else {
+        return Value::Null;
+    };
+    // 新名字必须是本语言认可的标识符（不以数字开头、不是保留字），否则会直接编不过。
+    let valid = !new_name.is_empty()
+        && new_name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && new_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !KEYWORDS.contains(&new_name);
+    if !valid {
+        return json!({ "changes": {} });
+    }
+    let Some(context) = context_at(text, params) else {
+        return json!({ "changes": {} });
+    };
+    let Some((name, _, _)) = identifier_at(&context) else {
+        return json!({ "changes": {} });
+    };
+    let edits: Vec<Value> = occurrences(text, &name)
+        .into_iter()
+        .map(|(number, start, length)| {
+            json!({
+                "range": span(number, context.lines[number], start, length),
+                "newText": new_name,
+            })
+        })
+        .collect();
+    let mut changes = serde_json::Map::new();
+    changes.insert(uri, Value::Array(edits));
+    json!({ "changes": changes })
 }
 
 fn location(uri: &str, line: usize, text: &str, name: &str) -> Value {
