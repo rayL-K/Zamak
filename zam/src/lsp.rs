@@ -801,8 +801,8 @@ fn member_items(context: &Context, owner: &str) -> Vec<Value> {
         }
         return items;
     }
-    // 值：按声明的类型给出方法与字段；看不出类型时全部列出。
-    let kind = value_type(context, owner);
+    // 值：先问检查器要真实类型，检查不过（代码写到一半）再按文字猜；都看不出时全部列出。
+    let kind = checked_type(context, owner).or_else(|| value_type(context, owner));
     let string = || {
         std_functions("string")
             .into_iter()
@@ -835,7 +835,45 @@ fn member_items(context: &Context, owner: &str) -> Vec<Value> {
     items
 }
 
-/// 从声明里看出变量的类型：`string`、`list`、`map` 或结构体名。
+/// 用检查器推断变量的真实类型：解析并检查光标之前的代码，问 `compiler::local_type`。
+/// 只认那几种补全需要的分类（`string`、`list`、`map`、结构体名），和 `value_type` 对齐；
+/// 任何一步失败都返回 None，让调用方退回文字推断。
+fn checked_type(context: &Context, name: &str) -> Option<String> {
+    // 光标之后（以及光标那一行）不参与检查：`thing.` 去掉点是裸表达式，去掉名字又是空块，
+    // 都会在光标这行报错，而对补全没有用处——要的类型在前面的语句里已经定下来了。
+    let mut prefix = String::new();
+    for line in context.lines.iter().take(context.line) {
+        prefix.push_str(line);
+        prefix.push('\n');
+    }
+    let module = compiler::parse(&prefix).ok()?;
+    // 检查器要知道入口函数，单文件入口是 `main`（与 `zam check` 一致）。
+    compiler::check(&module, "main").ok()?;
+    let ty = compiler::local_type(&module, context.line + 1, name)?;
+    // `&mut [string]`、`&Point` 这类借用按被借用的类型分类。
+    let ty = ty
+        .trim()
+        .trim_start_matches('&')
+        .trim_start_matches("mut ")
+        .trim()
+        .to_owned();
+    if ty == "string" {
+        Some("string".to_owned())
+    } else if ty.starts_with('[') {
+        Some("list".to_owned())
+    } else if ty.starts_with('{') {
+        Some("map".to_owned())
+    } else {
+        let head: String = ty
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (!head.is_empty() && head.starts_with(char::is_uppercase)).then_some(head)
+    }
+}
+
+/// 从声明里看出变量的类型：`string`、`list`、`map` 或结构体名。这是检查不通过时的退路；
+/// 能检查的项目先用 `checked_type`（检查器推断出的真实类型）。
 fn value_type(context: &Context, name: &str) -> Option<String> {
     let classify = |ty: &str| {
         let ty = ty

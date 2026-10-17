@@ -4696,6 +4696,9 @@ struct Checker<'a> {
     closures: BTreeMap<String, Vec<(String, bool)>>,
     // 正在检查泛型函数的副本：`copy(v)` 对 i64、f64、bool 也成立（T 可能是任何类型）。
     generic: bool,
+    // 块内声明的每个局部量的类型（`block` 退出时会从 `locals` 删掉它们，这里留一份）。
+    // 编辑器（`local_type`）靠它拿到光标处变量的类型。
+    declared: BTreeMap<String, Type>,
 }
 impl<'a> Checker<'a> {
     fn thawed(&self, root: &str) -> Result<(), String> {
@@ -5126,6 +5129,7 @@ impl<'a> Checker<'a> {
             frozen: self.frozen.clone(),
             module: self.module,
             generic: self.generic,
+            declared: Default::default(),
             discarded: false,
             written: Default::default(),
             closures: self.closures.clone(),
@@ -5461,6 +5465,7 @@ impl<'a> Checker<'a> {
                     frozen: Vec::new(),
                     module: self.module,
                     generic: self.generic,
+                    declared: Default::default(),
             discarded: false,
             written: Default::default(),
             closures: BTreeMap::new(),
@@ -6654,7 +6659,7 @@ impl<'a> Checker<'a> {
         })
     }
     fn block(&mut self, body: &Block, result: Type) -> Result<bool, String> {
-        let outer_names = self.locals.keys().cloned().collect();
+        let outer_names: BTreeSet<String> = self.locals.keys().cloned().collect();
         // 代码块里 `let x = &...` 冻结的根到块尾解冻。
         let outer_frozen = self.frozen.len();
         let mut returned = false;
@@ -7166,6 +7171,17 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // 块内声明的变量在退出时从 `locals` 删掉（它们不能逃出块），但编辑器要按位置查它们
+        // 的类型，所以在删之前留一份快照。
+        let declared: Vec<(String, Type)> = self
+            .locals
+            .iter()
+            .filter(|(name, _)| !outer_names.contains(*name))
+            .map(|(name, binding)| (name.clone(), binding.ty))
+            .collect();
+        for (name, ty) in declared {
+            self.declared.insert(name, ty);
+        }
         let outer: BTreeSet<_> = outer_names;
         self.locals.retain(|name, _| outer.contains(name));
         self.frozen.truncate(outer_frozen);
@@ -7245,6 +7261,7 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
             frozen: Vec::new(),
             module: name.split(':').next().unwrap_or(name),
             generic: name.ends_with(']'),
+            declared: Default::default(),
             discarded: false,
             written: Default::default(),
             closures: BTreeMap::new(),
@@ -7291,6 +7308,136 @@ pub fn check(module: &Module, entry: &str) -> Result<(), String> {
     } else {
         Err(errors.join(&DIAGNOSTIC_SEPARATOR.to_string()))
     }
+}
+
+/// 编辑器用：推断光标处的变量在所在函数里的静态类型，返回源码写法的类型名。
+///
+/// 走的是和检查器同一套 `locals` 绑定，所以 `let p = Point(...)` 之后 `p` 就是 `Point`，
+/// 不需要按字面猜。只要光标之前的代码能检查通过（正常写着的文件都满足），拿到的就是真实
+/// 类型；检查不通过（代码写到一半、有错）时返回 None，调用方退回文字推断。
+///
+/// `name` 由编辑器从光标左侧取出；它不在 `locals` 里（字段名、模块名、函数名）也返回 None，
+/// 那些不是“变量 `x.` 后面该列出什么”的问题。
+pub fn local_type(module: &Module, line: usize, name: &str) -> Option<String> {
+    // 包含这一行的函数：从它的声明行开始，到下一个函数声明前结束。
+    let mut starts: Vec<(usize, &String)> = module
+        .functions
+        .iter()
+        .filter(|(_, f)| !f.builtin && !f.external && f.generics.is_empty())
+        .map(|(function, f)| (f.position.0, function))
+        .collect();
+    starts.sort_unstable();
+    let index = starts.iter().rposition(|(start, _)| *start <= line)?;
+    let (_, function_name) = starts[index];
+    let end = starts.get(index + 1).map(|(next, _)| *next);
+    if end.is_some_and(|end| line >= end) {
+        return None;
+    }
+    let function = &module.functions[function_name];
+    let mut checker = Checker {
+        structs: &module.structs,
+        functions: &module.functions,
+        locals: BTreeMap::new(),
+        loops: Vec::new(),
+        position: function.position,
+        error: function.error,
+        result: function.result,
+        frozen: Vec::new(),
+        module: function_name.split(':').next().unwrap_or(function_name),
+        generic: false,
+        declared: BTreeMap::new(),
+        discarded: false,
+        written: Default::default(),
+        closures: BTreeMap::new(),
+    };
+    for (param, ty) in &function.params {
+        checker.locals.insert(
+            param.clone(),
+            Binding {
+                ty: *ty,
+                mutable: false,
+                live: true,
+            },
+        );
+    }
+    // 用整个函数体检查一遍；`block` 退出时会从 `locals` 删掉块内声明的变量，但它们已经
+    // 记进 `declared`，所以照样查得到。中途报错也没关系，前面的绑定仍然有效。
+    let _ = checker.block(&function.body, function.result);
+    let ty = *checker
+        .locals
+        .get(name)
+        .map(|binding| &binding.ty)
+        .or_else(|| checker.declared.get(name))?;
+    Some(type_text(ty, &module.structs))
+}
+
+/// 把类型写成源码里的样子（`&mut Point`、`[string]`、`{string: i64}`），供编辑器显示。
+pub fn type_text(ty: Type, structs: &BTreeMap<String, Struct>) -> String {
+    match ty {
+        Type::Owned => "string".to_owned(),
+        Type::Shared => "&string".to_owned(),
+        Type::Mutable => "&mut string".to_owned(),
+        Type::Unit => "()".to_owned(),
+        Type::Int => "i64".to_owned(),
+        Type::Float => "f64".to_owned(),
+        Type::Bool => "bool".to_owned(),
+        Type::Record(id) => record_text(id, structs),
+        Type::RecordRef(id, mutable) => format!(
+            "&{}{}",
+            if mutable { "mut " } else { "" },
+            record_text(id, structs)
+        ),
+        Type::ArrayInt(n) => format!("[i64; {n}]"),
+        Type::List(elem) => format!("[{}]", elem_text(elem, structs)),
+        Type::ListRef(elem, mutable) => format!(
+            "&{}[{}]",
+            if mutable { "mut " } else { "" },
+            elem_text(elem, structs)
+        ),
+        Type::Map(key, value) => format!(
+            "{{{}: {}}}",
+            elem_text(key, structs),
+            elem_text(value, structs)
+        ),
+        Type::MapRef(key, value, mutable) => format!(
+            "&{}{{{}: {}}}",
+            if mutable { "mut " } else { "" },
+            elem_text(key, structs),
+            elem_text(value, structs)
+        ),
+        Type::Func(id) | Type::FuncRef(id) => func_text(id, structs),
+    }
+}
+
+fn elem_text(elem: Elem, structs: &BTreeMap<String, Struct>) -> String {
+    match elem {
+        Elem::Int => "i64".to_owned(),
+        Elem::Float => "f64".to_owned(),
+        Elem::Bool => "bool".to_owned(),
+        Elem::Str => "string".to_owned(),
+        Elem::Record(id) => record_text(id, structs),
+        Elem::Nested(id) => type_text(nested(id), structs),
+        Elem::Func(id) => func_text(id, structs),
+    }
+}
+
+/// 结构体 id → 显示用的名字：在结构体表里找编号对得上的那个（表里的键是 `模块:名字`）。
+fn record_text(id: u64, structs: &BTreeMap<String, Struct>) -> String {
+    structs
+        .keys()
+        .find(|name| record_id(name) == id)
+        .cloned()
+        .unwrap_or_else(|| format!("#{id}"))
+}
+
+fn func_text(id: u64, structs: &BTreeMap<String, Struct>) -> String {
+    let (params, result) = func_sig(id);
+    let params = params
+        .iter()
+        .map(|ty| type_text(*ty, structs))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("fn({params}) -> {}", type_text(result, structs))
 }
 
 #[cfg(test)]

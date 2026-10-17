@@ -328,6 +328,78 @@ fn main():
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 补全用检查器推断出的真实类型：变量名和类型名不一样、类型来自函数返回值时，
+/// “按文字猜”猜不到，现在要能列出正确的方法与字段。
+#[test]
+fn completion_uses_the_checked_type_not_the_name() {
+    let root = std::env::temp_dir().join(format!("zam-lsp-types-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let source = "\
+struct Circle:
+    radius: f64
+
+    fn area(&self) -> f64:
+        self.radius * 3.0
+
+fn make() -> Circle:
+    Circle(radius: 1.0)
+
+fn main():
+    let thing = make()
+    let words: [string] = [\"a\", \"b\"]
+    thing.
+";
+    let file = root.join("main.zm");
+    std::fs::write(&file, source).unwrap();
+    let file_uri = uri(&file);
+    let mut client = Client::start(&root);
+    client.request(
+        "initialize",
+        json!({ "processId": null, "rootUri": uri(&root), "capabilities": {} }),
+    );
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": file_uri, "languageId": "zamak", "version": 1, "text": source } }),
+    );
+    // `thing.` 在第 12 行、第 10 列：`thing` 的类型是 `make()` 的返回值 `Circle`，
+    // 名字里看不出来——只有检查器知道。
+    let items = client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": file_uri }, "position": { "line": 12, "character": 10 } }),
+    );
+    let names = labels(&items);
+    assert!(names.contains(&"area".to_owned()), "{names:?}");
+    assert!(names.contains(&"radius".to_owned()), "{names:?}");
+    // 结构体上不该冒出列表方法。
+    assert!(!names.contains(&"push".to_owned()), "{names:?}");
+
+    // 列表同理：`words` 的标注是 `[string]`，`words.` 给出列表方法而不是结构体字段。
+    let list_source = "\
+fn main():
+    let words: [string] = [\"a\", \"b\"]
+    words.
+";
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": file_uri, "version": 2 }, "contentChanges": [{ "text": list_source }] }),
+    );
+    client.diagnostics(&file_uri);
+    let list = client.request(
+        "textDocument/completion",
+        json!({ "textDocument": { "uri": file_uri }, "position": { "line": 2, "character": 10 } }),
+    );
+    let list_names = labels(&list);
+    assert!(list_names.contains(&"push".to_owned()), "{list_names:?}");
+    assert!(list_names.contains(&"len".to_owned()), "{list_names:?}");
+
+    client.request("shutdown", Value::Null);
+    client.notify("exit", Value::Null);
+    assert!(client.child.wait().unwrap().success());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `textDocument/references`、`prepareRename` 与 `rename`：本文件内的局部变量和函数，
 /// 注释与字符串里同名的文字不算引用。
 #[test]
